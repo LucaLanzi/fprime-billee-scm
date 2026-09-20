@@ -1,6 +1,6 @@
-# billeeScm::RelayManager
+# billeeScm::PumpManager
 
-Component to control Science Control Module relays
+Component to control Science Control Module pumps
 
 ## Usage Examples
 Add usage examples here

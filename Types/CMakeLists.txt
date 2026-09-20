@@ -1,4 +1,4 @@
 register_fprime_module(
     AUTOCODER_INPUTS
-        "${CMAKE_CURRENT_LIST_DIR}/RelayTypes.fpp"
+        "${CMAKE_CURRENT_LIST_DIR}/PumpTypes.fpp"
 )

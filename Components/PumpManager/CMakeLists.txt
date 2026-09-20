@@ -16,9 +16,9 @@
 
 register_fprime_library(
     AUTOCODER_INPUTS
-        "${CMAKE_CURRENT_LIST_DIR}/RelayManager.fpp"
+        "${CMAKE_CURRENT_LIST_DIR}/PumpManager.fpp"
     SOURCES
-        "${CMAKE_CURRENT_LIST_DIR}/RelayManager.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/PumpManager.cpp"
     DEPENDS
         Types
 )
@@ -26,10 +26,10 @@ register_fprime_library(
 ### Unit Tests ###
 # register_fprime_ut(
 #     AUTOCODER_INPUTS
-#         "${CMAKE_CURRENT_LIST_DIR}/RelayManager.fpp"
+#         "${CMAKE_CURRENT_LIST_DIR}/PumpManager.fpp"
 #     SOURCES
-#         "${CMAKE_CURRENT_LIST_DIR}/test/ut/RelayManagerTestMain.cpp"
-#         "${CMAKE_CURRENT_LIST_DIR}/test/ut/RelayManagerTester.cpp"
+#         "${CMAKE_CURRENT_LIST_DIR}/test/ut/PumpManagerTestMain.cpp"
+#         "${CMAKE_CURRENT_LIST_DIR}/test/ut/PumpManagerTester.cpp"
 #     DEPENDS
 #         STest # For rules-based testing
 #     UT_AUTO_HELPERS

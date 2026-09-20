@@ -1,46 +1,46 @@
 module billeeScm {
-    @ Component to control Science Control Module relays
-    active component RelayManager {
+    @ Component to control Science Control Module pumps
+    active component PumpManager {
 
         # One async command/port is required for active components
         # This should be overridden by the developers with a useful command/port
         @  input port of type Svc.Sched to invoke the component
         async input port run: Svc.Sched
 
-        @ Command to toggle relay
-        async command relayToggle (
-            toggle: Fw.On             @< desired relay state
-            relay: billeeScm.relayId  @< which relay to control
+        @ Command to toggle pump
+        async command pumpToggle (
+            toggle: Fw.On           @< desired pump state
+            pump: billeeScm.pumpId  @< which pump to control
             ) opcode 0
 
-        @ Telemetry to keep relay 1 state
-        telemetry relay1State: Fw.Enabled
+        @ Telemetry to keep pump 1 state
+        telemetry pump1State: Fw.Enabled
 
-        @ Telemetry to keep relay 2 state
-        telemetry relay2State: Fw.Enabled
+        @ Telemetry to keep pump 2 state
+        telemetry pump2State: Fw.Enabled
 
-        @ Telemetry to keep relay 3 state
-        telemetry relay3State: Fw.Enabled
+        @ Telemetry to keep pump 3 state
+        telemetry pump3State: Fw.Enabled
 
-        @ Telemetry to keep relay 4 state
-        telemetry relay4State: Fw.Enabled
+        @ Telemetry to keep pump 4 state
+        telemetry pump4State: Fw.Enabled
 
-        @ Output ports driving each relay's physical GPIO pin
-        output port relay1Set: Drv.GpioWrite
-        output port relay2Set: Drv.GpioWrite
-        output port relay3Set: Drv.GpioWrite
-        output port relay4Set: Drv.GpioWrite
+        @ Output ports driving each pump's physical GPIO pin
+        output port pump1Set: Drv.GpioWrite
+        output port pump2Set: Drv.GpioWrite
+        output port pump3Set: Drv.GpioWrite
+        output port pump4Set: Drv.GpioWrite
 
-        @ Event to signal relay toggle
-        event relayState (
-            relay: billeeScm.relayId  @< which relay changed
-            toggleState: Fw.Enabled   @< the relay's new state
+        @ Event to signal pump toggle
+        event pumpState (
+            pump: billeeScm.pumpId   @< which pump changed
+            toggleState: Fw.Enabled  @< the pump's new state
         ) \
         severity activity high \
         id 0 \
-        format "Relay {} is {}"
+        format "Pump {} is {}"
 
-    
+
 
         ##############################################################################
         #### Uncomment the following examples to start customizing your component ####
