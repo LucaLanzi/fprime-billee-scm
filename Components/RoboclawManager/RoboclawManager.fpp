@@ -2,7 +2,7 @@ module billeeScm {
     @ Component capable of driving two seperate motors over Serial.
     active component RoboclawManager {
 
-        state machine instance billeeScm.MotorControlStateMachine: RoboclawStateMachine
+        state machine instance motorControlSM: MotorControlStateMachine
 
         @ Input port for run handler
         async input port run: Svc.Sched 
@@ -12,22 +12,22 @@ module billeeScm {
 
       @ Command to sent to roboclaw
         async command motorCmd (
-            motor: billeeScm.yellowjacket
+            motor: billeeScm.yellowJacket
             ) opcode 0x00
 
         event motorEvent(
             motor: yellowJacket
             ) \
-              severity warning low
+              severity warning low \
               id 0x00 \
               format "{}" 
 
         @ telemetry for motor state
-        telemetry billeeScm.yellowJacket : motor1
+        telemetry motor1: billeeScm.yellowJacket
 
-        telemetry billeeScm.yellowJacket : motor2
+        telemetry motor2: billeeScm.yellowJacket
 
-        telemetry billeeScm.yellowJacket : motor3
+        telemetry motor3: billeeScm.yellowJacket
 
         ################################################
 

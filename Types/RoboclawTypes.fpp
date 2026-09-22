@@ -17,7 +17,7 @@ module billeeScm {
 
     struct yellowJacket {
         motorNum: motorId        @< Define motor you are controlling
-        motorDir: motorDirection @< Motor direction state
+        motorDir: motorDir @< Motor direction state
         motorState: Fw.On        @< Motor on/off state
     } 
 
