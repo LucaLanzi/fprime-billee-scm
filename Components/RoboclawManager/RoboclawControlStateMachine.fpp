@@ -17,9 +17,14 @@ module billeeScm {
         action motorFwd: billeeScm.yellowJacket  @< forward the motor
         action motorRev:  billeeScm.yellowJacket @< reverse the motor
         action motorStop: billeeScm.yellowJacket @< stop the motor
+        action rejectCmd: billeeScm.yellowJacket @< answer a command that arrived while a communication fault is latched
 
+        @ Signals are queued on the component, so a cmdRecv can be dispatched in any state. Every state
+        @ that can see one must consume it (run an action that answers the pending command), otherwise
+        @ the command would never get a response. init accepts commands that arrive before the first tick.
         state init {
             on tick enter doWait
+            on cmdRecv enter CHOOSE_CMD
         }
 
         state doWait {
@@ -58,6 +63,7 @@ module billeeScm {
         state checkErr {
             on fail enter checkErr
             on errClr enter doWait
+            on cmdRecv do {rejectCmd} enter checkErr
         }
     }
 }

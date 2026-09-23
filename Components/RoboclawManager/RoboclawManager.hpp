@@ -95,6 +95,15 @@ class RoboclawManager final : public RoboclawManagerComponentBase {
         const billeeScm::yellowJacket& value                //!< The value
         ) override;
 
+    //! Implementation for action rejectCmd of state machine billeeScm_MotorControlStateMachine
+    //!
+    //! answer a command that arrived while a communication fault is latched
+    void billeeScm_MotorControlStateMachine_action_rejectCmd(
+        SmId smId,                                          //!< The state machine id
+        billeeScm_MotorControlStateMachine::Signal signal,  //!< The signal
+        const billeeScm::yellowJacket& value                //!< The value
+        ) override;
+
   private:
     // ----------------------------------------------------------------------
     // Implementations for internal state machine guards
@@ -143,6 +152,14 @@ class RoboclawManager final : public RoboclawManagerComponentBase {
     //! Update telemetry + event for a motor's actual resulting state (called from each action)
     void reportMotorState(const billeeScm::yellowJacket& motor);
 
+    //! Send the response for the command currently in flight (no-op if none). Called from the state
+    //! machine actions: signals are queued on the component, so the Roboclaw call has not happened yet
+    //! when motorCmd_cmdHandler returns and the real result is only known inside the action.
+    void completePendingCmd(Fw::CmdResponse response);
+
+    //! Roboclaw packet-serial duty range is 0-127; anything larger is rejected before any serial traffic.
+    static constexpr U8 MAX_MOTOR_SPEED = 127;
+
     // Packet-serial driver instance, constructed in configure() via placement new into this
     // static storage. NOT heap-allocated (no plain `new RoboClaw(...)`): this deployment never
     // calls Os::Baremetal::OverrideNewDelete::registerMemAllocator(), so the global `operator
@@ -154,7 +171,12 @@ class RoboclawManager final : public RoboclawManagerComponentBase {
     alignas(RoboClaw) uint8_t m_roboclawStorage[sizeof(RoboClaw)];
     RoboClaw* m_roboclaw = nullptr;  //!< Points into m_roboclawStorage once configure() runs
     U8 m_address = 0;                //!< This instance's Roboclaw device address, set in configure()
-    bool m_lastCmdOk = false;        //!< Result of the most recent action, read by motorCmd_cmdHandler
+
+    // The one motorCmd currently in flight (accepted by motorCmd_cmdHandler, answered by a state
+    // machine action). A second motorCmd while this is set is rejected as busy.
+    bool m_cmdPending = false;
+    FwOpcodeType m_pendingOpCode = 0;
+    U32 m_pendingCmdSeq = 0;
 
     // Limit-switch state, refreshed once per tick in run_handler: guard implementations are
     // const, but the generated limitSwGet_out port-invoke helper is not, so the switches are
