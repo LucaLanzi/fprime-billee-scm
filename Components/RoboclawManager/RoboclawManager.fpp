@@ -7,13 +7,22 @@ module billeeScm {
         @ Input port for run handler
         async input port run: Svc.Sched 
 
-        @ Output port to get the value of the limit switch
-        output port limitSwGet: Drv.GpioRead
+        @ Output port to get the value of the limit switch (index 0 = Motor1, index 1 = Motor2)
+        output port limitSwGet: [2] Drv.GpioRead
 
       @ Command to sent to roboclaw
         async command motorCmd (
             motor: billeeScm.yellowJacket
             ) opcode 0x00
+
+        @ Clears a latched communication-fault (checkErr) state, allowing further motorCmds
+        async command clearError() opcode 0x01
+
+        @ Does Motor1 have a limit switch wired for safety-stop? If false, its switch is never read.
+        param motor1HasLimitSwitch: bool default true
+
+        @ Does Motor2 have a limit switch wired for safety-stop? If false, its switch is never read.
+        param motor2HasLimitSwitch: bool default true
 
         event motorEvent(
             motor: yellowJacket
@@ -26,8 +35,6 @@ module billeeScm {
         telemetry motor1: billeeScm.yellowJacket
 
         telemetry motor2: billeeScm.yellowJacket
-
-        telemetry motor3: billeeScm.yellowJacket
 
         ################################################
 

@@ -20,9 +20,8 @@ register_fprime_library(
         "${CMAKE_CURRENT_LIST_DIR}/RoboclawControlStateMachine.fpp"
     SOURCES
         "${CMAKE_CURRENT_LIST_DIR}/RoboclawManager.cpp"
-#   DEPENDS
-
-#       MyPackage_MyOtherModule
+    DEPENDS
+        RoboClaw
 )
 
 ### Unit Tests ###

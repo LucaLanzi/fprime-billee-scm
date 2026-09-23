@@ -16,11 +16,9 @@ module billeeScm {
     }
 
     struct yellowJacket {
-        motorNum: motorId        @< Define motor you are controlling
-        motorDir: motorDir @< Motor direction state
-        motorState: Fw.On        @< Motor on/off state
+        motorNum: motorId        @< Define motor you are controlling (1 or 2)
+        motorDir: motorDir       @< Motor direction (arbitrarily set by initial wiring)
+        speed: U8                @< Motor speed magnitude, 0-127 (Roboclaw PWM duty range)
+        motorState: Fw.On        @< Motor on/off state 
     } 
-
-    
-
 }

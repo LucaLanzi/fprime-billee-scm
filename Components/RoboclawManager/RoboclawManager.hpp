@@ -8,6 +8,11 @@
 #define billeeScm_RoboclawManager_HPP
 
 #include "Components/RoboclawManager/RoboclawManagerComponentAc.hpp"
+#include <RoboClaw.h>
+// RoboClaw.h pulls in Arduino's HardwareSerial.h, which #defines HIGH/LOW as plain macros that
+// would otherwise clobber Fw::Logic::HIGH/LOW below. FprimeArduino.hpp captures them as
+// Arduino::DEF_HIGH/DEF_LOW and #undefs the raw macros -- same fix GpioDriver.cpp uses.
+#include <Arduino/config/FprimeArduino.hpp>
 
 namespace billeeScm {
 
@@ -24,65 +29,128 @@ class RoboclawManager final : public RoboclawManagerComponentBase {
     //! Destroy RoboclawManager object
     ~RoboclawManager();
 
+    //! Bind this instance to its physical Roboclaw board. Call once during topology init,
+    //! before the rate group starts ticking this component.
+    void configure(HardwareSerial* serial, U8 address, uint32_t baud = 38400);
+
   private:
     // ----------------------------------------------------------------------
     // Handler implementations for typed input ports
     // ----------------------------------------------------------------------
 
     //! Handler implementation for run
+    //!
+    //! Input port for run handler
     void run_handler(FwIndexType portNum,  //!< The port number
-                      U32 context          //!< The call order
-                      ) override;
+                     U32 context           //!< The call order
+                     ) override;
 
+  private:
     // ----------------------------------------------------------------------
     // Handler implementations for commands
     // ----------------------------------------------------------------------
 
     //! Handler implementation for command motorCmd
-    void motorCmd_cmdHandler(FwOpcodeType opCode,        //!< The opcode
-                              U32 cmdSeq,                 //!< The command sequence number
-                              billeeScm::yellowJacket motor) override;
+    //!
+    //! Command to sent to roboclaw
+    void motorCmd_cmdHandler(FwOpcodeType opCode,  //!< The opcode
+                             U32 cmdSeq,           //!< The command sequence number
+                             billeeScm::yellowJacket motor) override;
 
+    //! Handler implementation for command clearError
+    void clearError_cmdHandler(FwOpcodeType opCode,  //!< The opcode
+                                U32 cmdSeq            //!< The command sequence number
+                                ) override;
+
+  private:
     // ----------------------------------------------------------------------
     // Implementations for internal state machine actions
     // ----------------------------------------------------------------------
 
     //! Implementation for action motorFwd of state machine billeeScm_MotorControlStateMachine
+    //!
+    //! forward the motor
     void billeeScm_MotorControlStateMachine_action_motorFwd(
-        SmId smId,
-        billeeScm_MotorControlStateMachine::Signal signal) override;
+        SmId smId,                                          //!< The state machine id
+        billeeScm_MotorControlStateMachine::Signal signal,  //!< The signal
+        const billeeScm::yellowJacket& value                //!< The value
+        ) override;
 
     //! Implementation for action motorRev of state machine billeeScm_MotorControlStateMachine
+    //!
+    //! reverse the motor
     void billeeScm_MotorControlStateMachine_action_motorRev(
-        SmId smId,
-        billeeScm_MotorControlStateMachine::Signal signal) override;
+        SmId smId,                                          //!< The state machine id
+        billeeScm_MotorControlStateMachine::Signal signal,  //!< The signal
+        const billeeScm::yellowJacket& value                //!< The value
+        ) override;
 
     //! Implementation for action motorStop of state machine billeeScm_MotorControlStateMachine
+    //!
+    //! stop the motor
     void billeeScm_MotorControlStateMachine_action_motorStop(
-        SmId smId,
-        billeeScm_MotorControlStateMachine::Signal signal) override;
+        SmId smId,                                          //!< The state machine id
+        billeeScm_MotorControlStateMachine::Signal signal,  //!< The signal
+        const billeeScm::yellowJacket& value                //!< The value
+        ) override;
 
+  private:
     // ----------------------------------------------------------------------
     // Implementations for internal state machine guards
     // ----------------------------------------------------------------------
 
     //! Implementation for guard isFwdCmd of state machine billeeScm_MotorControlStateMachine
+    //!
+    //! true if the command requests FORWARD
     bool billeeScm_MotorControlStateMachine_guard_isFwdCmd(
-        SmId smId,
-        billeeScm_MotorControlStateMachine::Signal signal,
-        const billeeScm::yellowJacket& value) const override;
+        SmId smId,                                          //!< The state machine id
+        billeeScm_MotorControlStateMachine::Signal signal,  //!< The signal
+        const billeeScm::yellowJacket& value                //!< The value
+    ) const override;
 
     //! Implementation for guard isRevCmd of state machine billeeScm_MotorControlStateMachine
+    //!
+    //! true if the command requests REVERSE
     bool billeeScm_MotorControlStateMachine_guard_isRevCmd(
-        SmId smId,
-        billeeScm_MotorControlStateMachine::Signal signal,
-        const billeeScm::yellowJacket& value) const override;
+        SmId smId,                                          //!< The state machine id
+        billeeScm_MotorControlStateMachine::Signal signal,  //!< The signal
+        const billeeScm::yellowJacket& value                //!< The value
+    ) const override;
 
     //! Implementation for guard isStopCmd of state machine billeeScm_MotorControlStateMachine
+    //!
+    //! true if the command requests STOPPED
     bool billeeScm_MotorControlStateMachine_guard_isStopCmd(
-        SmId smId,
-        billeeScm_MotorControlStateMachine::Signal signal,
-        const billeeScm::yellowJacket& value) const override;
+        SmId smId,                                          //!< The state machine id
+        billeeScm_MotorControlStateMachine::Signal signal,  //!< The signal
+        const billeeScm::yellowJacket& value                //!< The value
+    ) const override;
+
+    //! Implementation for guard isLimitSwTripped of state machine billeeScm_MotorControlStateMachine
+    //!
+    //! true if this motor's limit switch is tripped and the commanded direction should be blocked
+    bool billeeScm_MotorControlStateMachine_guard_isLimitSwTripped(
+        SmId smId,                                          //!< The state machine id
+        billeeScm_MotorControlStateMachine::Signal signal,  //!< The signal
+        const billeeScm::yellowJacket& value                //!< The value
+    ) const override;
+
+    // ----------------------------------------------------------------------
+    // Helpers
+    // ----------------------------------------------------------------------
+
+    //! Update telemetry + event for a motor's actual resulting state (called from each action)
+    void reportMotorState(const billeeScm::yellowJacket& motor);
+
+    RoboClaw* m_roboclaw = nullptr;  //!< Packet-serial driver instance, allocated in configure()
+    U8 m_address = 0;                //!< This instance's Roboclaw device address, set in configure()
+    bool m_lastCmdOk = false;        //!< Result of the most recent action, read by motorCmd_cmdHandler
+
+    // Limit-switch state, refreshed once per tick in run_handler: guard implementations are
+    // const, but the generated limitSwGet_out port-invoke helper is not, so the switches are
+    // polled here and the guard just reads the cached result.
+    bool m_motor1SwitchTripped = false;
+    bool m_motor2SwitchTripped = false;
 };
 
 }  // namespace billeeScm

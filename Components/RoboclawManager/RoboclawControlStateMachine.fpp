@@ -12,10 +12,11 @@ module billeeScm {
         guard isFwdCmd: billeeScm.yellowJacket  @< true if the command requests FORWARD
         guard isRevCmd: billeeScm.yellowJacket  @< true if the command requests REVERSE
         guard isStopCmd: billeeScm.yellowJacket @< true if the command requests STOPPED
+        guard isLimitSwTripped: billeeScm.yellowJacket @< true if this motor's limit switch is tripped and the commanded direction should be blocked
 
-        action motorFwd  @< forward the motor
-        action motorRev  @< reverse the motor
-        action motorStop @< stop the motor
+        action motorFwd: billeeScm.yellowJacket  @< forward the motor
+        action motorRev:  billeeScm.yellowJacket @< reverse the motor
+        action motorStop: billeeScm.yellowJacket @< stop the motor
 
         state init {
             on tick enter doWait
@@ -32,8 +33,14 @@ module billeeScm {
             on fail enter checkErr
         }
 
-        @ Dispatch a received command to the matching motor action
+        @ Gate: a tripped, enabled limit switch overrides any FORWARD/REVERSE command with an immediate stop
         choice CHOOSE_CMD {
+            if isLimitSwTripped do {motorStop} enter doWait \
+                else enter CHOOSE_CMD_FWD
+        }
+
+        @ Dispatch a received command to the matching motor action
+        choice CHOOSE_CMD_FWD {
             if isFwdCmd do {motorFwd} enter doCmd \
                 else enter CHOOSE_CMD_REV
         }
