@@ -18,7 +18,9 @@ RoboclawManager ::~RoboclawManager() {}
 
 void RoboclawManager ::configure(HardwareSerial* serial, U8 address, uint32_t baud) {
     this->m_address = address;
-    this->m_roboclaw = new RoboClaw(serial, 10000);
+    // Placement new: constructs into m_roboclawStorage (declared in the header), not the heap --
+    // see the comment there for why plain `new` hangs this deployment on real hardware.
+    this->m_roboclaw = new (this->m_roboclawStorage) RoboClaw(serial, 10000);
     this->m_roboclaw->begin(baud);
 }
 

@@ -13,6 +13,7 @@
 // would otherwise clobber Fw::Logic::HIGH/LOW below. FprimeArduino.hpp captures them as
 // Arduino::DEF_HIGH/DEF_LOW and #undefs the raw macros -- same fix GpioDriver.cpp uses.
 #include <Arduino/config/FprimeArduino.hpp>
+#include <new>  // for placement new, see m_roboclawStorage below
 
 namespace billeeScm {
 
@@ -142,7 +143,16 @@ class RoboclawManager final : public RoboclawManagerComponentBase {
     //! Update telemetry + event for a motor's actual resulting state (called from each action)
     void reportMotorState(const billeeScm::yellowJacket& motor);
 
-    RoboClaw* m_roboclaw = nullptr;  //!< Packet-serial driver instance, allocated in configure()
+    // Packet-serial driver instance, constructed in configure() via placement new into this
+    // static storage. NOT heap-allocated (no plain `new RoboClaw(...)`): this deployment never
+    // calls Os::Baremetal::OverrideNewDelete::registerMemAllocator(), so the global `operator
+    // new` override's FW_ASSERT(pAllocator != nullptr) would fire on the very first heap
+    // allocation anywhere in the firmware and halt the board before it ever produces output --
+    // confirmed on real hardware: build succeeds, board boots, zero bytes ever appear on
+    // serial. Placement new below constructs into pre-reserved memory without going through
+    // the overridden global operator new at all, sidestepping the issue entirely.
+    alignas(RoboClaw) uint8_t m_roboclawStorage[sizeof(RoboClaw)];
+    RoboClaw* m_roboclaw = nullptr;  //!< Points into m_roboclawStorage once configure() runs
     U8 m_address = 0;                //!< This instance's Roboclaw device address, set in configure()
     bool m_lastCmdOk = false;        //!< Result of the most recent action, read by motorCmd_cmdHandler
 
