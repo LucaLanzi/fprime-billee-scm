@@ -15,7 +15,7 @@ module billeeScm {
         @ Roboclaw. motor.motorNum is 1 or 2; motor.motorDir is FORWARD, REVERSE or STOPPED (STOPPED ignores
         @ speed); motor.motorState is ignored on input.
         async command motorCmd (
-            motor: billeeScm.yellowJacket @< speed field: 0-127 (raw Roboclaw duty, 127 = full speed). 128-255 is rejected.
+            motor: billeeScm.yellowJacket
             ) opcode 0x00
 
         @ Clears a latched communication-fault (checkErr) state, allowing further motorCmds
@@ -34,11 +34,9 @@ module billeeScm {
               id 0x00 \
               format "{}" 
 
-        @ Motor1 state (direction, speed 0-127, on/off). Published every run cycle, starting with
         @ STOPPED/0/OFF (assumed, not read back from the Roboclaw) until the first command.
         telemetry motor1: billeeScm.yellowJacket
 
-        @ Motor2 state (direction, speed 0-127, on/off). Published every run cycle, starting with
         @ STOPPED/0/OFF (assumed, not read back from the Roboclaw) until the first command.
         telemetry motor2: billeeScm.yellowJacket
 

@@ -54,7 +54,7 @@ Every accepted `motorCmd` reaches exactly one action, and that action sends exac
 `motorCmd(FORWARD/REVERSE)` received while that motor's enabled limit switch is tripped → `motorStop` action runs directly (bypassing the commanded direction) → telemetry/event report `STOPPED` → state machine returns straight to `doWait` (not through `doCmd`'s normal `success` path).
 
 **Communication fault and recovery:**
-Roboclaw serial exchange fails inside a `motorFwd`, `motorRev`, or (for an explicit `STOPPED` command) `motorStop` action (the limit-switch stop path is the exception, see "Known Limitations") → `fail` signal → `checkErr` (latched) → subsequent `motorCmd`s rejected immediately with `EXECUTION_ERROR` (state checked before forwarding to the state machine) → operator sends `clearError` → `errClr` signal → back to `doWait` → normal commands work again.
+Roboclaw serial exchange fails inside a `motorFwd`/`motorRev`/`motorStop`-from-`STOPPED` action (the limit-switch stop path is the exception, see "Known Limitations") → `fail` signal → `checkErr` (latched) → subsequent `motorCmd`s rejected immediately with `EXECUTION_ERROR` (state checked before forwarding to the state machine) → operator sends `clearError` → `errClr` signal → back to `doWait` → normal commands work again.
 
 ## Command-to-Roboclaw Data Flow
 How a `motorCmd` becomes bytes on the serial line:
@@ -76,7 +76,7 @@ How a `motorCmd` becomes bytes on the serial line:
 - `speed` is the Roboclaw packet-serial duty value: **0-127, where 0 = stop and 127 = full speed** (64 is roughly half). It is passed to the driver **unscaled**, byte-for-byte, so the value commanded is the value on the wire.
 - The F´ field is a `U8`, so 128-255 can be typed in GDS, but it is **rejected with `VALIDATION_ERROR`; it is not scaled or clamped**. Sending 255 does not mean full speed.
 - The check applies to every direction including `STOPPED`. For `STOPPED`, `speed` is otherwise ignored (duty 0 is sent). `motorState` in the argument is never read on input.
-- The range is shown to the end user in the GDS command form: in the `motorCmd` description and in the `motor` argument description. (The `@<` annotation on the `speed` member of `yellowJacket` is in the dictionary, but the installed `fprime-gds` reads struct-member descriptions from the wrong level of the JSON and does not display it, so the text is repeated at the command level.)
+- The range is shown to the end user once, in the `motorCmd` command description at the top of the GDS command form. It cannot be shown next to the `speed` field alone: the installed `fprime-gds` (4.1.0) ignores the `@<` annotation on the `speed` member of `yellowJacket` (it reads struct-member descriptions from the wrong level of the dictionary JSON) and copies a struct argument's description onto every field, so no description is set on the `motor` argument. Showing the note on `speed` only would require flattening `motorCmd` into separate `motorNum`/`motorDir`/`speed` arguments, which changes the command format and was not done.
 
 ## Parameters
 | Name | Description |
@@ -156,11 +156,11 @@ Documented behaviour that has not been changed:
 - **A failed limit-switch stop does not latch `checkErr`.** On the limit-switch path `motorStop` enters `doWait` directly; the `fail` signal it then sends is ignored in `doWait` by the generated state machine, so the fault is not latched (the command is still answered `EXECUTION_ERROR`) and later commands are not rejected.
 - **Limit-switch read failures read as "not tripped".** A failed `limitSwGet` call is treated as `false`, so it is also reported as `false` on `motorNLimitSwitch`.
 - **Initial telemetry is assumed.** `STOPPED / 0 / OFF` before the first command is not read back from the Roboclaw (see "Telemetry").
-- **GDS struct-member descriptions.** The installed `fprime-gds` does not display the `@<` annotation of `yellowJacket` members, which is why the speed range is repeated in the command and argument descriptions.
+- **GDS struct-member descriptions.** The installed `fprime-gds` does not display the `@<` annotation of `yellowJacket` members and copies a struct argument's description onto every field. The speed range is therefore stated once in the command description and cannot be shown next to the `speed` box only (see "Speed contract").
 
 ## Change Log
 | Date | Description |
 |---|---|
 | 2026-09-23 | Initial implementation: motor direction/speed control, per-motor limit-switch safety stop, communication-fault latch + `clearError`, multi-instance support for multiple Roboclaw boards. |
 | 2026-09-23 | RoboClaw constructed via placement new (no heap). `motorCmd` responses now come from the state-machine actions and reflect the real result (signals are queued, the previous handler answered with the previous command's result). Added `speed` > 127 -> `VALIDATION_ERROR`, single command in flight, `rejectCmd` action + `init`/`checkErr` handling of `cmdRecv` so no accepted command is left unanswered. Queue depth raised to 10. |
-| 2026-09-23 | Documented the command-to-Roboclaw data flow (opcodes, wire format, retries) and the speed contract: 0-127 is the Roboclaw's raw duty, passed unscaled; 128-255 is rejected, not scaled. `motorCmd` command and `motor` argument descriptions now state the range so it shows in the GDS command form. Telemetry: `motor1`/`motor2` now start as `STOPPED / 0 / OFF` and, with new `motor1LimitSwitch`/`motor2LimitSwitch` (bool) channels, are republished every `run` tick so they are always available. Added ROBOCLAW-008/009/010, checklist #8-10 and a Known Limitations section. |
+| 2026-09-23 | Documented the command-to-Roboclaw data flow (opcodes, wire format, retries) and the speed contract: 0-127 is the Roboclaw's raw duty, passed unscaled; 128-255 is rejected, not scaled. The `motorCmd` command description now states the range so it shows in the GDS command form (once, at the top; GDS cannot show it on the `speed` field alone). Telemetry: `motor1`/`motor2` now start as `STOPPED / 0 / OFF` and, with new `motor1LimitSwitch`/`motor2LimitSwitch` (bool) channels, are republished every `run` tick so they are always available. Added ROBOCLAW-008/009/010, checklist #8-10 and a Known Limitations section. |
