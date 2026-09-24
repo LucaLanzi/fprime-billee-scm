@@ -178,6 +178,13 @@ class RoboclawManager final : public RoboclawManagerComponentBase {
     FwOpcodeType m_pendingOpCode = 0;
     U32 m_pendingCmdSeq = 0;
 
+    // Last reported state of each motor, republished as telemetry every run_handler cycle so the
+    // channels exist from the first tick and stay visible to a GDS that connects later (TlmChan
+    // only re-sends a channel when it is written). STOPPED/0/OFF until the first command is an
+    // assumption: nothing is read back from, or sent to, the Roboclaw at boot.
+    billeeScm::yellowJacket m_motor1State{billeeScm::motorId::MOTOR1, billeeScm::motorDir::STOPPED, 0, Fw::On::OFF};
+    billeeScm::yellowJacket m_motor2State{billeeScm::motorId::MOTOR2, billeeScm::motorDir::STOPPED, 0, Fw::On::OFF};
+
     // Limit-switch state, refreshed once per tick in run_handler: guard implementations are
     // const, but the generated limitSwGet_out port-invoke helper is not, so the switches are
     // polled here and the guard just reads the cached result.

@@ -20,6 +20,7 @@ See "Class Diagram" and "Sequence Diagrams" below.
 - `m_address: U8` — this instance's Roboclaw device address, set in `configure()`.
 - `motorControlSM: MotorControlStateMachine` — an internal F´ state machine instance (see "Component States") that sequences command dispatch, limit-switch gating, and fault latching. State-machine signals are **queued on the component's own message queue** and dispatched later, they are not run inline.
 - `m_motor1SwitchTripped` / `m_motor2SwitchTripped: bool` — per-motor limit-switch state, refreshed once per `run` tick.
+- `m_motor1State` / `m_motor2State: yellowJacket` — the last state reported for each motor (initially `STOPPED / 0 / OFF`), republished as telemetry every `run` tick. Updated by `reportMotorState`.
 - `m_cmdPending` / `m_pendingOpCode` / `m_pendingCmdSeq` — the single `motorCmd` currently in flight. Because signals are queued, `motorCmd_cmdHandler` cannot know the result of the Roboclaw exchange when it returns; it records the opcode/sequence and the state-machine *action* answers via `completePendingCmd()` once the real result is known.
 - `reportMotorState(const yellowJacket&)` — private helper, the single place that writes `motor1`/`motor2` telemetry and logs `motorEvent`; called from each of the three actions with the motor's *actual* resulting state, not the raw command.
 - `completePendingCmd(response)` — sends the command response for the in-flight command (no-op if none). Called by `motorFwd`/`motorRev`/`motorStop`/`rejectCmd`.
@@ -27,9 +28,9 @@ See "Class Diagram" and "Sequence Diagrams" below.
 ## Port Descriptions
 | Name | Description |
 |---|---|
-| `run` | `Svc.Sched` input; drives the state machine's `tick` signal and refreshes cached limit-switch state once per rate-group cycle. |
+| `run` | `Svc.Sched` input; once per rate-group cycle (~100 ms) it refreshes cached limit-switch state, publishes the four telemetry channels (see "Telemetry"), and drives the state machine's `tick` signal. |
 | `limitSwGet` | A 2-element array of `Drv.GpioRead` output ports (`[2] Drv.GpioRead`); index 0 reads Motor1's limit switch, index 1 reads Motor2's. Only invoked for a motor whose `hasLimitSwitch` param is `true`. |
-| `motorCmd` (command) | Commands one motor (1 or 2) to a direction (`FORWARD`/`REVERSE`/`STOPPED`) and speed (0-127). |
+| `motorCmd` (command) | Commands one motor (1 or 2) to a direction (`FORWARD`/`REVERSE`/`STOPPED`) and speed (0-127, the Roboclaw's raw duty value, **not** 0-255 and not scaled — see "Command-to-Roboclaw Data Flow"). |
 | `clearError` (command) | Clears a latched communication-fault (`checkErr`) state. |
 | `motor1` / `motor2` (telemetry) | The actual resulting state of each motor after the most recent command or limit-switch stop. |
 | `motorEvent` (event) | Logged every time a motor's actual state changes (command-driven or limit-switch-triggered). |
@@ -53,7 +54,29 @@ Every accepted `motorCmd` reaches exactly one action, and that action sends exac
 `motorCmd(FORWARD/REVERSE)` received while that motor's enabled limit switch is tripped → `motorStop` action runs directly (bypassing the commanded direction) → telemetry/event report `STOPPED` → state machine returns straight to `doWait` (not through `doCmd`'s normal `success` path).
 
 **Communication fault and recovery:**
-Roboclaw serial exchange fails inside an action → `fail` signal → `checkErr` (latched) → subsequent `motorCmd`s rejected immediately with `EXECUTION_ERROR` (state checked before forwarding to the state machine) → operator sends `clearError` → `errClr` signal → back to `doWait` → normal commands work again.
+Roboclaw serial exchange fails inside a `motorFwd`, `motorRev`, or (for an explicit `STOPPED` command) `motorStop` action (the limit-switch stop path is the exception, see "Known Limitations") → `fail` signal → `checkErr` (latched) → subsequent `motorCmd`s rejected immediately with `EXECUTION_ERROR` (state checked before forwarding to the state machine) → operator sends `clearError` → `errClr` signal → back to `doWait` → normal commands work again.
+
+## Command-to-Roboclaw Data Flow
+How a `motorCmd` becomes bytes on the serial line:
+
+1. `motorCmd_cmdHandler` validates `speed` (`> 127` -> `VALIDATION_ERROR`, nothing sent), then checks for a latched fault / a command already in flight, records the opcode and sequence, and queues a `cmdRecv(motor)` signal.
+2. The state machine's `CHOOSE_CMD` choice runs first: if the target motor's enabled limit switch is tripped and the command is not `STOPPED`, `motorStop` runs. Otherwise `CHOOSE_CMD_FWD` / `_REV` / `_STOP` select `motorFwd` / `motorRev` / `motorStop` from `motorDir`.
+3. The action calls the vendored `RoboClaw` driver (`lib/vendor-lib/RoboClaw/`). The motor is selected with `motorNum == MOTOR1 ? M1 : M2` (any other value goes to M2):
+
+| Commanded | Action | Library call | Opcode byte sent (M1 / M2) |
+|---|---|---|---|
+| `FORWARD` | `motorFwd` | `ForwardM1/M2(address, speed)` | 0 / 4 |
+| `REVERSE` | `motorRev` | `BackwardM1/M2(address, speed)` | 1 / 5 |
+| `STOPPED`, or limit-switch override | `motorStop` | `ForwardM1/M2(address, 0)` | 0 / 4 |
+
+   There is no dedicated stop opcode: a stop is a forward command at duty 0.
+4. `RoboClaw::write_n(3, address, opcode, speed)` sends the packet `[address, opcode, speed, CRC16 high, CRC16 low]` and waits for a `0xFF` acknowledge. The read timeout is 10 ms (`RoboClaw(serial, 10000)`, in µs) and `MAXRETRY` is 2, so a call makes up to 3 attempts. Returning `false` makes the action send `fail` (-> `checkErr`, except on the limit-switch path, see "Known Limitations").
+
+### Speed contract
+- `speed` is the Roboclaw packet-serial duty value: **0-127, where 0 = stop and 127 = full speed** (64 is roughly half). It is passed to the driver **unscaled**, byte-for-byte, so the value commanded is the value on the wire.
+- The F´ field is a `U8`, so 128-255 can be typed in GDS, but it is **rejected with `VALIDATION_ERROR`; it is not scaled or clamped**. Sending 255 does not mean full speed.
+- The check applies to every direction including `STOPPED`. For `STOPPED`, `speed` is otherwise ignored (duty 0 is sent). `motorState` in the argument is never read on input.
+- The range is shown to the end user in the GDS command form: in the `motorCmd` description and in the `motor` argument description. (The `@<` annotation on the `speed` member of `yellowJacket` is in the dictionary, but the installed `fprime-gds` reads struct-member descriptions from the wrong level of the JSON and does not display it, so the text is repeated at the command level.)
 
 ## Parameters
 | Name | Description |
@@ -64,7 +87,7 @@ Roboclaw serial exchange fails inside an action → `fail` signal → `checkErr`
 ## Commands
 | Name | Description |
 |---|---|
-| `motorCmd` | Drive the specified motor (`motorNum`: 1 or 2) in the given direction (`motorDir`: `FORWARD`/`REVERSE`/`STOPPED`) at the given `speed` (0-127). Answered `VALIDATION_ERROR` if `speed` > 127 (nothing is sent on the serial line), `EXECUTION_ERROR` if the instance is latched in `checkErr` or another `motorCmd` is still in flight, otherwise the response reflects the real result of the Roboclaw exchange (`OK` / `EXECUTION_ERROR`). |
+| `motorCmd` | Drive the specified motor (`motorNum`: 1 or 2) in the given direction (`motorDir`: `FORWARD`/`REVERSE`/`STOPPED`) at the given `speed` (0-127: the Roboclaw's raw duty, 127 = full speed; not 0-255, not scaled). Answered `VALIDATION_ERROR` if `speed` > 127 (nothing is sent on the serial line; also applies to `STOPPED`), `EXECUTION_ERROR` if the instance is latched in `checkErr` or another `motorCmd` is still in flight, otherwise the response reflects the real result of the Roboclaw exchange (`OK` / `EXECUTION_ERROR`). |
 | `clearError` | Clears a latched `checkErr` communication-fault state. Safe to send at any time — a no-op if not currently latched. |
 
 ## Events
@@ -77,6 +100,12 @@ Roboclaw serial exchange fails inside an action → `fail` signal → `checkErr`
 |---|---|
 | `motor1` | Actual current state (`yellowJacket`: motor number, direction, speed, on/off) of Motor1, updated after every command/stop affecting it. |
 | `motor2` | Same, for Motor2. |
+| `motor1LimitSwitch` | `bool`, `true` = Motor1's limit switch is tripped. `false` if the switch is not wired (`motor1HasLimitSwitch` = `false`) or the GPIO read failed. |
+| `motor2LimitSwitch` | Same, for Motor2. |
+
+**Always available.** All four channels are written on every `run` tick (~100 ms), not only on change. They therefore have a value from the first tick after boot, without any command, and a GDS that connects mid-run sees them within one cycle (`Svc.TlmChan` re-sends a channel only when it is written). A command's result is also written immediately, by `reportMotorState`, so it does not wait for the next tick.
+
+**Initial value.** Until the first command, `motor1`/`motor2` report `STOPPED / speed 0 / OFF`. This is an **assumption** (a Roboclaw powers up idle), not a read-back: nothing is sent to the Roboclaw at boot, because an exchange with no controller attached would block for its serial timeout and could latch `checkErr` before anyone sends a command.
 
 ## Unit Tests
 No automated unit tests exist yet — `register_fprime_ut` in `CMakeLists.txt` is present but commented out. Verification is currently manual bench testing (see Step 7 of the implementation plan for the full procedure: normal commands, limit-switch trip/param-disable, communication-fault latch/`clearError`, multi-instance isolation).
@@ -94,13 +123,17 @@ No automated unit tests exist yet — `register_fprime_ut` in `CMakeLists.txt` i
 | ROBOCLAW-005 | Shall support multiple independently-configured instances (distinct serial port + device address) without shared state between them. | Bench test: Step 7.4/7.6 (cross-instance isolation) |
 | ROBOCLAW-006 | Shall reject a `motorCmd` whose `speed` exceeds 127 with `VALIDATION_ERROR`, without sending anything to the Roboclaw. | GDS: `motorCmd` FORWARD speed 200 -> `VALIDATION_ERROR` |
 | ROBOCLAW-007 | Shall answer each accepted `motorCmd` exactly once, with a response that reflects that command's actual Roboclaw result (not a previous command's). | GDS: `motorCmd` STOPPED with a controller attached -> `OK`; with none attached -> `EXECUTION_ERROR` |
+| ROBOCLAW-008 | Shall send the commanded `speed` (0-127) to the Roboclaw unscaled, and shall send duty 0 for `STOPPED`. | Code inspection ("Command-to-Roboclaw Data Flow"); Bench test: GDS checklist #8 |
+| ROBOCLAW-009 | Shall publish `motor1`, `motor2`, `motor1LimitSwitch` and `motor2LimitSwitch` telemetry from the first `run` tick after boot (no command required) and on every subsequent tick. | GDS: reconnect after boot, channels present with no command sent (checklist #9) |
+| ROBOCLAW-010 | Shall report each motor's polled limit-switch state on its `motorNLimitSwitch` channel (`false` when the switch is disabled by parameter or the read fails). | GDS: ground the limit-switch pin -> channel `true` (checklist #10) |
 
 ## Deployment Notes
 - **Queue depth.** Because the state machine's own signals (`tick`, `cmdRecv`, `success`/`fail`) share the component queue with `run` and the commands, `instances.fpp` gives each Roboclaw instance `Default.ROBOCLAW_QUEUE_SIZE` (10) rather than the default 3. Overflow is an `FW_ASSERT`.
 - **Limit-switch wiring.** A limit switch must close to **GND** when tripped: the component treats a `LOW` read as "tripped". `Arduino::GpioDriver` only offers plain `INPUT`, so `setupTopology()` enables the Teensy's internal pull-up (`pinMode(pin, Arduino::DEF_INPUT_PULLUP)`) on the limit-switch pins 6-9; an open switch reads `HIGH`. Both `motorNHasLimitSwitch` parameters default to `true`, so an unwired pin with the pull-up reads `HIGH` (not tripped) and is harmless.
 - **Addresses / ports.** `roboclaw1Manager` is address `0x80` on `Serial3` (pins 14 TX / 15 RX); `roboclaw2Manager` is address `0x81` on `Serial4` (pins 17 TX / 16 RX), 38400 baud.
 - **Task priority.** All active components must be given priorities that are non-increasing in alphabetical start order (see the comment in `instances.fpp`); a bug in `Os::Baremetal::TaskRunner::addTask()` otherwise drops a task and its queue overflows.
-- **Blocking.** A Roboclaw serial call with no controller attached blocks the cooperative main loop for its serial timeout (10 ms per try, with retries) before the command fails and latches `checkErr`.
+- **Blocking.** A Roboclaw serial call with no controller attached blocks the cooperative main loop for its serial timeout (10 ms per try, up to 3 tries = roughly 30 ms) before the command fails and latches `checkErr`.
+- **Telemetry traffic.** Each instance writes 4 channels every `run` tick (~100 ms: `rateDriver.configure(1)` ms x rate-group divisor 100), i.e. 8 channel writes per cycle for the two Roboclaw instances, so telemetry is always available to a late-connecting GDS. `motorEvent` is still logged only when a motor's state changes.
 
 ## GDS Bench Checklist
 Send from GDS (names are prefixed `billee_deployment.roboclaw1Manager.` / `roboclaw2Manager.`). Use a free-spinning motor and low speeds.
@@ -113,9 +146,21 @@ Send from GDS (names are prefixed `billee_deployment.roboclaw1Manager.` / `roboc
 | 5 | Unplug the controller's serial line, send any `motorCmd` | `EXECUTION_ERROR`; a further `motorCmd` is rejected at once (latched) |
 | 6 | Reconnect, send `clearError`, then `motorCmd` again | `clearError` `OK`; commands work again |
 | 7 | Repeat 1-6 on the other instance | independent behavior (ROBOCLAW-005) |
+| 8 | `motorCmd` MOTOR1 FORWARD speed 127, then speed 128 | 127: `OK`, motor at full duty (unscaled, ROBOCLAW-008); 128: `VALIDATION_ERROR`, no motion, no `motorEvent` |
+| 9 | Reset the board, then open/reconnect GDS **without sending any command** | `motor1`/`motor2` show `STOPPED / 0 / OFF` and both `motorNLimitSwitch` channels are present and updating, on both instances (ROBOCLAW-009) |
+| 10 | Ground a motor's limit-switch pin, then release it | that motor's `motorNLimitSwitch` goes `true`, then `false` (ROBOCLAW-010) |
+
+## Known Limitations
+Documented behaviour that has not been changed:
+- **A failed stop still reports `STOPPED`.** `motorStop` always reports `STOPPED / 0 / OFF` in `motor1`/`motor2` and `motorEvent`, even if the Roboclaw did not acknowledge the command (`FORWARD`/`REVERSE` report `OFF` on failure). Only the command response (`EXECUTION_ERROR`) shows the failure, so telemetry can say a motor is stopped while it may still be running.
+- **A failed limit-switch stop does not latch `checkErr`.** On the limit-switch path `motorStop` enters `doWait` directly; the `fail` signal it then sends is ignored in `doWait` by the generated state machine, so the fault is not latched (the command is still answered `EXECUTION_ERROR`) and later commands are not rejected.
+- **Limit-switch read failures read as "not tripped".** A failed `limitSwGet` call is treated as `false`, so it is also reported as `false` on `motorNLimitSwitch`.
+- **Initial telemetry is assumed.** `STOPPED / 0 / OFF` before the first command is not read back from the Roboclaw (see "Telemetry").
+- **GDS struct-member descriptions.** The installed `fprime-gds` does not display the `@<` annotation of `yellowJacket` members, which is why the speed range is repeated in the command and argument descriptions.
 
 ## Change Log
 | Date | Description |
 |---|---|
 | 2026-09-23 | Initial implementation: motor direction/speed control, per-motor limit-switch safety stop, communication-fault latch + `clearError`, multi-instance support for multiple Roboclaw boards. |
 | 2026-09-23 | RoboClaw constructed via placement new (no heap). `motorCmd` responses now come from the state-machine actions and reflect the real result (signals are queued, the previous handler answered with the previous command's result). Added `speed` > 127 -> `VALIDATION_ERROR`, single command in flight, `rejectCmd` action + `init`/`checkErr` handling of `cmdRecv` so no accepted command is left unanswered. Queue depth raised to 10. |
+| 2026-09-23 | Documented the command-to-Roboclaw data flow (opcodes, wire format, retries) and the speed contract: 0-127 is the Roboclaw's raw duty, passed unscaled; 128-255 is rejected, not scaled. `motorCmd` command and `motor` argument descriptions now state the range so it shows in the GDS command form. Telemetry: `motor1`/`motor2` now start as `STOPPED / 0 / OFF` and, with new `motor1LimitSwitch`/`motor2LimitSwitch` (bool) channels, are republished every `run` tick so they are always available. Added ROBOCLAW-008/009/010, checklist #8-10 and a Known Limitations section. |

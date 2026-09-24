@@ -47,6 +47,13 @@ void RoboclawManager ::run_handler(FwIndexType portNum, U32 context) {
         this->m_motor2SwitchTripped = false;
     }
 
+    // Publish every cycle (not only on change): gives the channels a value from the first tick and
+    // keeps them visible to a GDS that connects mid-run.
+    this->tlmWrite_motor1(this->m_motor1State);
+    this->tlmWrite_motor2(this->m_motor2State);
+    this->tlmWrite_motor1LimitSwitch(this->m_motor1SwitchTripped);
+    this->tlmWrite_motor2LimitSwitch(this->m_motor2SwitchTripped);
+
     this->motorControlSM_sendSignal_tick();
 }
 
@@ -187,9 +194,13 @@ void RoboclawManager ::completePendingCmd(Fw::CmdResponse response) {
 }
 
 void RoboclawManager ::reportMotorState(const billeeScm::yellowJacket& motor) {
+    // Cache the state so run_handler keeps republishing it; also write now so a command's result is
+    // visible immediately rather than on the next cycle.
     if (motor.get_motorNum() == billeeScm::motorId::MOTOR1) {
+        this->m_motor1State = motor;
         this->tlmWrite_motor1(motor);
     } else {
+        this->m_motor2State = motor;
         this->tlmWrite_motor2(motor);
     }
     this->log_WARNING_LO_motorEvent(motor);

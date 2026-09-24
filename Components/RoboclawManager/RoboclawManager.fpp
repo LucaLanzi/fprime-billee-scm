@@ -10,9 +10,12 @@ module billeeScm {
         @ Output port to get the value of the limit switch (index 0 = Motor1, index 1 = Motor2)
         output port limitSwGet: [2] Drv.GpioRead
 
-      @ Command to sent to roboclaw
+        @ Drive one motor. motor.speed is the Roboclaw's raw duty value, 0-127 (0 = stop, 127 = full speed),
+        @ NOT 0-255 and NOT scaled: 128-255 is rejected with VALIDATION_ERROR and nothing is sent to the
+        @ Roboclaw. motor.motorNum is 1 or 2; motor.motorDir is FORWARD, REVERSE or STOPPED (STOPPED ignores
+        @ speed); motor.motorState is ignored on input.
         async command motorCmd (
-            motor: billeeScm.yellowJacket
+            motor: billeeScm.yellowJacket @< speed field: 0-127 (raw Roboclaw duty, 127 = full speed). 128-255 is rejected.
             ) opcode 0x00
 
         @ Clears a latched communication-fault (checkErr) state, allowing further motorCmds
@@ -31,10 +34,19 @@ module billeeScm {
               id 0x00 \
               format "{}" 
 
-        @ telemetry for motor state
+        @ Motor1 state (direction, speed 0-127, on/off). Published every run cycle, starting with
+        @ STOPPED/0/OFF (assumed, not read back from the Roboclaw) until the first command.
         telemetry motor1: billeeScm.yellowJacket
 
+        @ Motor2 state (direction, speed 0-127, on/off). Published every run cycle, starting with
+        @ STOPPED/0/OFF (assumed, not read back from the Roboclaw) until the first command.
         telemetry motor2: billeeScm.yellowJacket
+
+        @ Motor1 limit switch: true = tripped. False if the switch is not wired (param disabled) or the GPIO read failed.
+        telemetry motor1LimitSwitch: bool
+
+        @ Motor2 limit switch: true = tripped. False if the switch is not wired (param disabled) or the GPIO read failed.
+        telemetry motor2LimitSwitch: bool
 
         ################################################
 
