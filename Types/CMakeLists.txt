@@ -3,4 +3,5 @@ register_fprime_module(
         "${CMAKE_CURRENT_LIST_DIR}/PumpTypes.fpp"
         "${CMAKE_CURRENT_LIST_DIR}/RoboclawTypes.fpp"
         "${CMAKE_CURRENT_LIST_DIR}/PCA9685Types.fpp"
+        "${CMAKE_CURRENT_LIST_DIR}/StirrerTypes.fpp"
 )
