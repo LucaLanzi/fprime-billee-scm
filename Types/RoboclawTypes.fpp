@@ -9,16 +9,10 @@ module billeeScm {
         SWITCH2 = 2 @< Limit switch corresponding to Motor 2
     }
 
-    enum motorDir {
-        STOPPED = 1 @< Drill Direction Forward
-        FORWARD = 2 @< Drill Direction Forward
-        REVERSE = 3 @< Drill Direction Forward
-    }
-
     struct yellowJacket {
         motorNum: motorId        @< Define motor you are controlling (1 or 2)
         motorDir: motorDir       @< Motor direction (arbitrarily set by initial wiring)
-        speed: U8                @< Motor speed magnitude, 0-127 (Roboclaw PWM duty range)
+        pwm: U16                 @< PWM magnitude, 0-1000 (0.1% steps of full duty)
         motorState: Fw.On        @< Motor on/off state 
     } 
 }

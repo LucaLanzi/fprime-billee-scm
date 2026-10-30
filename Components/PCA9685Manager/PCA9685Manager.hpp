@@ -19,14 +19,11 @@ namespace billeeScm {
 
 class PCA9685Manager final : public PCA9685ManagerComponentBase {
   public:
-    //! Servo channels exposed (the chip has 16). Must equal billeeScm::ServoAngles::SIZE (Types/PCA9685Types.fpp).
+    //! Servo channels exposed (the chip has 16). Must equal billeeScm::ServoStates::SIZE (Types/PCA9685Types.fpp).
     static constexpr U8 NUM_SERVO_CHANNELS = 12;
 
-    //! What a channel's servo is. Decides which command may drive it (see the calibration table in the .cpp).
-    enum class ServoType : U8 {
-        POSITIONAL,  //!< Limited-range angle servo: setServoAngle only
-        CONTINUOUS   //!< Continuous-rotation servo: setServoSpeed only
-    };
+    //! Full-scale PWM magnitude of setServo: 0-1000 = 0.0-100.0% of a servo's calibrated span in one direction
+    static constexpr U16 PWM_FULL_SCALE = 1000;
 
     // ----------------------------------------------------------------------
     // Component construction and destruction
@@ -62,37 +59,31 @@ class PCA9685Manager final : public PCA9685ManagerComponentBase {
     // Handler implementations for commands
     // ----------------------------------------------------------------------
 
-    //! Handler implementation for command setServoAngle
-    void setServoAngle_cmdHandler(FwOpcodeType opCode,  //!< The opcode
-                                  U32 cmdSeq,           //!< The command sequence number
-                                  U8 channel,           //!< Servo channel, 0-11
-                                  F32 angle             //!< Angle in degrees, -90.0..+90.0
-                                  ) override;
-
-    //! Handler implementation for command setServoSpeed
-    void setServoSpeed_cmdHandler(FwOpcodeType opCode,  //!< The opcode
-                                  U32 cmdSeq,           //!< The command sequence number
-                                  U8 channel,           //!< Servo channel, 0-11
-                                  F32 speed             //!< Speed, -1.0..+1.0
-                                  ) override;
+    //! Handler implementation for command setServo
+    void setServo_cmdHandler(FwOpcodeType opCode,          //!< The opcode
+                             U32 cmdSeq,                   //!< The command sequence number
+                             billeeScm::ServoId servo,     //!< Servo to drive
+                             U16 pwm,                      //!< PWM magnitude, 0-1000
+                             billeeScm::motorDir direction //!< FORWARD, REVERSE or STOPPED
+                             ) override;
 
     //! Handler implementation for command setChannelPWM
-    void setChannelPWM_cmdHandler(FwOpcodeType opCode,  //!< The opcode
-                                  U32 cmdSeq,           //!< The command sequence number
-                                  U8 channel,           //!< Channel, 0-11
-                                  U16 pwm               //!< 0 = release, else PWM counts within the channel's limits
+    void setChannelPWM_cmdHandler(FwOpcodeType opCode,       //!< The opcode
+                                  U32 cmdSeq,                //!< The command sequence number
+                                  billeeScm::ServoId servo,  //!< Servo to drive
+                                  U16 pwm                    //!< 0 = release, else PWM counts within the channel's limits
                                   ) override;
 
     //! Handler implementation for command releaseChannel
-    void releaseChannel_cmdHandler(FwOpcodeType opCode,  //!< The opcode
-                                   U32 cmdSeq,           //!< The command sequence number
-                                   U8 channel            //!< Channel, 0-11
+    void releaseChannel_cmdHandler(FwOpcodeType opCode,      //!< The opcode
+                                   U32 cmdSeq,               //!< The command sequence number
+                                   billeeScm::ServoId servo  //!< Servo to release
                                    ) override;
 
-    //! Handler implementation for command releaseAll
-    void releaseAll_cmdHandler(FwOpcodeType opCode,  //!< The opcode
-                               U32 cmdSeq            //!< The command sequence number
-                               ) override;
+    //! Handler implementation for command hardStop
+    void hardStop_cmdHandler(FwOpcodeType opCode,  //!< The opcode
+                             U32 cmdSeq            //!< The command sequence number
+                             ) override;
 
     //! Handler implementation for command reinit
     void reinit_cmdHandler(FwOpcodeType opCode,  //!< The opcode
@@ -104,10 +95,14 @@ class PCA9685Manager final : public PCA9685ManagerComponentBase {
     // Helpers
     // ----------------------------------------------------------------------
 
-    //! Piecewise-linear map of position in [-1,+1] to a PWM count using the channel's calibrated
-    //! min/mid/max (-1 -> min, 0 -> mid, +1 -> max). Never returns a value outside [min,max].
+    //! Pulse for a PWM magnitude (0-PWM_FULL_SCALE) and direction, using the channel's calibrated min/mid/max:
+    //! STOPPED or 0 -> mid, FORWARD full scale -> max, REVERSE full scale -> min (swapped if the channel is
+    //! `reversed`). Linear on each side of mid. Never returns a value outside [min,max].
     //! Deliberately NOT PCA9685_ServoEval: see the comment on m_pcaStorage.
-    U16 pwmForPosition(U8 channel, F32 position) const;
+    U16 pulseFor(U8 channel, U16 pwm, billeeScm::motorDir direction) const;
+
+    //! Record a channel's commanded state (republished as servoStates every run tick)
+    void setState(U8 channel, billeeScm::motorDir direction, U16 pwm, U16 pulse);
 
     //! Send one PWM value (0 = release) to one channel, then check the transaction result.
     //! @return true if the I2C transaction succeeded
@@ -135,7 +130,7 @@ class PCA9685Manager final : public PCA9685ManagerComponentBase {
     PCA9685* m_pca = nullptr;  //!< Points into m_pcaStorage once configure() runs
 
     bool m_initOk = false;               //!< True once initDevice() has fully succeeded
-    F32 m_values[NUM_SERVO_CHANNELS] = {};  //!< Last commanded value per channel (degrees / speed / 0 = released)
+    billeeScm::ServoStates m_states;     //!< Last commanded state per channel (default: STOPPED, 0, released)
     U32 m_i2cErrorCount = 0;             //!< Failed I2C transactions since boot
     U8 m_lastI2cError = 0;               //!< Wire code of the most recent transaction (0 = ok)
 };

@@ -13,11 +13,13 @@ module billeeScm {
         guard isRevCmd: billeeScm.yellowJacket  @< true if the command requests REVERSE
         guard isStopCmd: billeeScm.yellowJacket @< true if the command requests STOPPED
         guard isLimitSwTripped: billeeScm.yellowJacket @< true if this motor's limit switch is tripped and the commanded direction should be blocked
+        guard isCancelled: billeeScm.yellowJacket   @< true if a hardStop cancelled this command after it was queued
 
         action motorFwd: billeeScm.yellowJacket  @< forward the motor
         action motorRev:  billeeScm.yellowJacket @< reverse the motor
         action motorStop: billeeScm.yellowJacket @< stop the motor
         action rejectCmd: billeeScm.yellowJacket @< answer a command that arrived while a communication fault is latched
+        action dropCmd: billeeScm.yellowJacket @< discard a command a hardStop cancelled (hardStop already answered it)
 
         @ Signals are queued on the component, so a cmdRecv can be dispatched in any state. Every state
         @ that can see one must consume it (run an action that answers the pending command), otherwise
@@ -38,8 +40,14 @@ module billeeScm {
             on fail enter checkErr
         }
 
-        @ Gate: a tripped, enabled limit switch overrides any FORWARD/REVERSE command with an immediate stop
+        @ Gate 1: a command cancelled by hardStop while it sat in the queue must not restart the motor
         choice CHOOSE_CMD {
+            if isCancelled do {dropCmd} enter doWait \
+                else enter CHOOSE_CMD_LIMIT
+        }
+
+        @ Gate 2: a tripped, enabled limit switch overrides any FORWARD/REVERSE command with an immediate stop
+        choice CHOOSE_CMD_LIMIT {
             if isLimitSwTripped do {motorStop} enter doWait \
                 else enter CHOOSE_CMD_FWD
         }

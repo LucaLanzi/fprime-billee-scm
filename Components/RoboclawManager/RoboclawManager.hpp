@@ -51,17 +51,23 @@ class RoboclawManager final : public RoboclawManagerComponentBase {
     // Handler implementations for commands
     // ----------------------------------------------------------------------
 
-    //! Handler implementation for command motorCmd
-    //!
-    //! Command to sent to roboclaw
-    void motorCmd_cmdHandler(FwOpcodeType opCode,  //!< The opcode
-                             U32 cmdSeq,           //!< The command sequence number
-                             billeeScm::yellowJacket motor) override;
+    //! Handler implementation for command setMotor
+    void setMotor_cmdHandler(FwOpcodeType opCode,          //!< The opcode
+                             U32 cmdSeq,                   //!< The command sequence number
+                             billeeScm::motorId motor,     //!< MOTOR1 or MOTOR2
+                             U16 pwm,                      //!< PWM magnitude, 0-1000
+                             billeeScm::motorDir direction //!< FORWARD, REVERSE or STOPPED
+                             ) override;
 
     //! Handler implementation for command clearError
     void clearError_cmdHandler(FwOpcodeType opCode,  //!< The opcode
                                 U32 cmdSeq            //!< The command sequence number
                                 ) override;
+
+    //! Handler implementation for command hardStop
+    void hardStop_cmdHandler(FwOpcodeType opCode,  //!< The opcode
+                             U32 cmdSeq            //!< The command sequence number
+                             ) override;
 
   private:
     // ----------------------------------------------------------------------
@@ -99,6 +105,15 @@ class RoboclawManager final : public RoboclawManagerComponentBase {
     //!
     //! answer a command that arrived while a communication fault is latched
     void billeeScm_MotorControlStateMachine_action_rejectCmd(
+        SmId smId,                                          //!< The state machine id
+        billeeScm_MotorControlStateMachine::Signal signal,  //!< The signal
+        const billeeScm::yellowJacket& value                //!< The value
+        ) override;
+
+    //! Implementation for action dropCmd of state machine billeeScm_MotorControlStateMachine
+    //!
+    //! discard a command a hardStop cancelled (hardStop already answered it)
+    void billeeScm_MotorControlStateMachine_action_dropCmd(
         SmId smId,                                          //!< The state machine id
         billeeScm_MotorControlStateMachine::Signal signal,  //!< The signal
         const billeeScm::yellowJacket& value                //!< The value
@@ -145,20 +160,40 @@ class RoboclawManager final : public RoboclawManagerComponentBase {
         const billeeScm::yellowJacket& value                //!< The value
     ) const override;
 
+    //! Implementation for guard isCancelled of state machine billeeScm_MotorControlStateMachine
+    //!
+    //! true if a hardStop cancelled this command after it was queued
+    bool billeeScm_MotorControlStateMachine_guard_isCancelled(
+        SmId smId,                                          //!< The state machine id
+        billeeScm_MotorControlStateMachine::Signal signal,  //!< The signal
+        const billeeScm::yellowJacket& value                //!< The value
+    ) const override;
+
     // ----------------------------------------------------------------------
     // Helpers
     // ----------------------------------------------------------------------
 
-    //! Update telemetry + event for a motor's actual resulting state (called from each action)
-    void reportMotorState(const billeeScm::yellowJacket& motor);
+    //! Update telemetry (+ motorEvent if logEvent) for a motor's actual resulting state (called from each action)
+    void reportMotorState(const billeeScm::yellowJacket& motor, bool logEvent = true);
+
+    //! Drive one motor at a signed duty (-32767..+32767; 0 = stop). Selects M1/M2 from motorNum.
+    //! @return true if the Roboclaw acknowledged the packet
+    bool sendDuty(billeeScm::motorId motor, I16 duty);
+
+    //! Map a validated PWM magnitude (0-PWM_FULL_SCALE) to the Roboclaw's duty magnitude (0-MAX_DUTY), rounded
+    static I16 toDuty(U16 pwm);
 
     //! Send the response for the command currently in flight (no-op if none). Called from the state
     //! machine actions: signals are queued on the component, so the Roboclaw call has not happened yet
-    //! when motorCmd_cmdHandler returns and the real result is only known inside the action.
+    //! when setMotor_cmdHandler returns and the real result is only known inside the action.
     void completePendingCmd(Fw::CmdResponse response);
 
-    //! Roboclaw packet-serial duty range is 0-127; anything larger is rejected before any serial traffic.
-    static constexpr U8 MAX_MOTOR_SPEED = 127;
+    //! Full-scale PWM magnitude of setMotor (0-1000 = 0.0-100.0% duty); anything larger is rejected before any
+    //! serial traffic. Same scale as PCA9685Manager::PWM_FULL_SCALE.
+    static constexpr U16 PWM_FULL_SCALE = 1000;
+
+    //! Full duty of the Roboclaw's signed duty commands (DutyM1/DutyM2/DutyM1M2)
+    static constexpr I16 MAX_DUTY = 32767;
 
     // Packet-serial driver instance, constructed in configure() via placement new into this
     // static storage. NOT heap-allocated (no plain `new RoboClaw(...)`): this deployment never
@@ -172,11 +207,18 @@ class RoboclawManager final : public RoboclawManagerComponentBase {
     RoboClaw* m_roboclaw = nullptr;  //!< Points into m_roboclawStorage once configure() runs
     U8 m_address = 0;                //!< This instance's Roboclaw device address, set in configure()
 
-    // The one motorCmd currently in flight (accepted by motorCmd_cmdHandler, answered by a state
-    // machine action). A second motorCmd while this is set is rejected as busy.
+    // The one setMotor currently in flight (accepted by setMotor_cmdHandler, answered by a state
+    // machine action). A second setMotor while this is set is rejected as busy.
     bool m_cmdPending = false;
     FwOpcodeType m_pendingOpCode = 0;
     U32 m_pendingCmdSeq = 0;
+
+    // Commands cancelled by hardStop whose cmdRecv signal is still queued. hardStop answers the command and
+    // clears m_cmdPending at once, but the signal still reaches the state machine later; each one consumes a
+    // count (dropCmd, or rejectCmd in checkErr) instead of running. A counter, not a flag: a second hardStop can
+    // cancel a newer command before the first cancelled signal has been dispatched. Signals are FIFO, so the
+    // cancelled ones are always the oldest queued.
+    U8 m_cancelledCmds = 0;
 
     // Last reported state of each motor, republished as telemetry every run_handler cycle so the
     // channels exist from the first tick and stay visible to a GDS that connects later (TlmChan
