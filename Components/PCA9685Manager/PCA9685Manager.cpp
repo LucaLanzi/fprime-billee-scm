@@ -8,40 +8,42 @@
 
 namespace billeeScm {
 
-static_assert(billeeScm::ServoAngles::SIZE == PCA9685Manager::NUM_SERVO_CHANNELS,
-              "ServoAngles (Types/PCA9685Types.fpp) and NUM_SERVO_CHANNELS must have the same size");
+static_assert(billeeScm::ServoStates::SIZE == PCA9685Manager::NUM_SERVO_CHANNELS,
+              "ServoStates (Types/PCA9685Types.fpp) and NUM_SERVO_CHANNELS must have the same size");
+static_assert(billeeScm::ServoId::NUM_CONSTANTS == PCA9685Manager::NUM_SERVO_CHANNELS,
+              "ServoId (Types/PCA9685Types.fpp) must name every servo channel");
 
 namespace {
 
-using ServoType = PCA9685Manager::ServoType;
-
-//! Per-channel servo type and pulse limits, in PCA9685 counts (4096 counts per 20 ms frame at 50 Hz).
+//! Per-channel pulse limits, in PCA9685 counts (4096 counts per 20 ms frame at 50 Hz).
 //! minPwm/maxPwm are the servo's safe mechanical end points: no command can ever send a pulse outside them
-//! (a positional servo driven past its range can break its limiter pin). midPwm is the calibrated center
-//! (POSITIONAL) or the stop pulse (CONTINUOUS). Defaults are the nominal 2.5%/7.5%/12.5% of the frame.
+//! (a positional servo driven past its range can break its limiter pin). midPwm is the neutral pulse: the
+//! calibrated center of a positional servo, the stop pulse of a continuous one. PWM magnitude scales the
+//! distance from mid toward max (FORWARD) or min (REVERSE). reversed swaps the two, so FORWARD can mean the
+//! same physical direction however the servo is mounted. Defaults are the nominal 2.5%/7.5%/12.5% of the frame.
 //! Bench-tune with setChannelPWM, then copy the values into this table.
 struct ServoCal {
-    ServoType type;
-    U16 minPwm;  //!< Pulse at -90 degrees / full reverse
-    U16 midPwm;  //!< Pulse at 0 degrees / stopped
-    U16 maxPwm;  //!< Pulse at +90 degrees / full forward
+    U16 minPwm;     //!< Pulse at full REVERSE (end stop / full reverse speed)
+    U16 midPwm;     //!< Neutral pulse: centred / stopped
+    U16 maxPwm;     //!< Pulse at full FORWARD (end stop / full forward speed)
+    bool reversed;  //!< Swap FORWARD and REVERSE for this servo
 };
 
-constexpr ServoCal kDefaultCal = {ServoType::POSITIONAL, 102, 307, 512};
+constexpr ServoCal kDefaultCal = {102, 307, 512, false};
 
 constexpr ServoCal kServoCal[PCA9685Manager::NUM_SERVO_CHANNELS] = {
-    kDefaultCal,  // channel 0
-    kDefaultCal,  // channel 1
-    kDefaultCal,  // channel 2
-    kDefaultCal,  // channel 3
-    kDefaultCal,  // channel 4
-    kDefaultCal,  // channel 5
-    kDefaultCal,  // channel 6
-    kDefaultCal,  // channel 7
-    kDefaultCal,  // channel 8
-    kDefaultCal,  // channel 9
-    kDefaultCal,  // channel 10
-    kDefaultCal,  // channel 11
+    kDefaultCal,  // SERVO0
+    kDefaultCal,  // SERVO1
+    kDefaultCal,  // SERVO2
+    kDefaultCal,  // SERVO3
+    kDefaultCal,  // SERVO4
+    kDefaultCal,  // SERVO5
+    kDefaultCal,  // SERVO6
+    kDefaultCal,  // SERVO7
+    kDefaultCal,  // SERVO8
+    kDefaultCal,  // SERVO9
+    kDefaultCal,  // SERVO10
+    kDefaultCal,  // SERVO11
 };
 
 //! Channel value reported in I2cFault when the failure is not tied to one channel (init / release all).
@@ -74,11 +76,7 @@ void PCA9685Manager ::configure(TwoWire* wire, U8 a5a0, uint32_t i2cSpeed) {
 void PCA9685Manager ::run_handler(FwIndexType portNum, U32 context) {
     // Publish every cycle (not only on change): gives the channels a value from the first tick and keeps them
     // visible to a GDS that connects mid-run. This handler does no I2C.
-    billeeScm::ServoAngles angles;
-    for (U8 channel = 0; channel < NUM_SERVO_CHANNELS; channel++) {
-        angles[channel] = this->m_values[channel];
-    }
-    this->tlmWrite_servoAngles(angles);
+    this->tlmWrite_servoStates(this->m_states);
     this->tlmWrite_i2cErrorCount(this->m_i2cErrorCount);
     this->tlmWrite_lastI2cError(this->m_lastI2cError);
 }
@@ -87,11 +85,13 @@ void PCA9685Manager ::run_handler(FwIndexType portNum, U32 context) {
 // Handler implementations for commands
 // ----------------------------------------------------------------------
 
-void PCA9685Manager ::setServoAngle_cmdHandler(FwOpcodeType opCode, U32 cmdSeq, U8 channel, F32 angle) {
-    // Anything invalid (bad channel, wrong servo type, out-of-range or NaN angle) never reaches the bus.
-    // Written as !(in range) so NaN is rejected too.
-    if (channel >= NUM_SERVO_CHANNELS || kServoCal[channel].type != ServoType::POSITIONAL ||
-        !(angle >= -90.0f && angle <= 90.0f)) {
+void PCA9685Manager ::setServo_cmdHandler(FwOpcodeType opCode,
+                                          U32 cmdSeq,
+                                          billeeScm::ServoId servo,
+                                          U16 pwm,
+                                          billeeScm::motorDir direction) {
+    // Anything invalid (bad servo or direction, magnitude past full scale) never reaches the bus
+    if (!servo.isValid() || !direction.isValid() || pwm > PWM_FULL_SCALE) {
         this->cmdResponse_out(opCode, cmdSeq, Fw::CmdResponse::VALIDATION_ERROR);
         return;
     }
@@ -99,35 +99,25 @@ void PCA9685Manager ::setServoAngle_cmdHandler(FwOpcodeType opCode, U32 cmdSeq, 
         this->cmdResponse_out(opCode, cmdSeq, Fw::CmdResponse::EXECUTION_ERROR);
         return;
     }
-    const bool ok = this->writeChannel(channel, this->pwmForPosition(channel, angle / 90.0f));
+    const U8 channel = static_cast<U8>(servo.e);
+    const U16 pulse = this->pulseFor(channel, pwm, direction);
+    const bool ok = this->writeChannel(channel, pulse);
     if (ok) {
-        this->m_values[channel] = angle;
+        // A STOPPED command's magnitude is ignored, so record 0 rather than a number that was never applied
+        this->setState(channel, direction, (direction == billeeScm::motorDir::STOPPED) ? 0 : pwm, pulse);
     }
     this->respond(opCode, cmdSeq, ok);
 }
 
-void PCA9685Manager ::setServoSpeed_cmdHandler(FwOpcodeType opCode, U32 cmdSeq, U8 channel, F32 speed) {
-    if (channel >= NUM_SERVO_CHANNELS || kServoCal[channel].type != ServoType::CONTINUOUS ||
-        !(speed >= -1.0f && speed <= 1.0f)) {
-        this->cmdResponse_out(opCode, cmdSeq, Fw::CmdResponse::VALIDATION_ERROR);
-        return;
-    }
-    if (!this->m_initOk) {
-        this->cmdResponse_out(opCode, cmdSeq, Fw::CmdResponse::EXECUTION_ERROR);
-        return;
-    }
-    const bool ok = this->writeChannel(channel, this->pwmForPosition(channel, speed));
-    if (ok) {
-        this->m_values[channel] = speed;
-    }
-    this->respond(opCode, cmdSeq, ok);
-}
-
-void PCA9685Manager ::setChannelPWM_cmdHandler(FwOpcodeType opCode, U32 cmdSeq, U8 channel, U16 pwm) {
+void PCA9685Manager ::setChannelPWM_cmdHandler(FwOpcodeType opCode, U32 cmdSeq, billeeScm::ServoId servo, U16 pwm) {
     // 0 releases the channel; anything else must be inside the channel's calibrated pulse limits, so a
     // bring-up command can never drive a limited-range servo past its end stops (4096 "full on" is never valid).
-    if (channel >= NUM_SERVO_CHANNELS ||
-        (pwm != 0 && (pwm < kServoCal[channel].minPwm || pwm > kServoCal[channel].maxPwm))) {
+    if (!servo.isValid()) {
+        this->cmdResponse_out(opCode, cmdSeq, Fw::CmdResponse::VALIDATION_ERROR);
+        return;
+    }
+    const U8 channel = static_cast<U8>(servo.e);
+    if (pwm != 0 && (pwm < kServoCal[channel].minPwm || pwm > kServoCal[channel].maxPwm)) {
         this->cmdResponse_out(opCode, cmdSeq, Fw::CmdResponse::VALIDATION_ERROR);
         return;
     }
@@ -137,14 +127,14 @@ void PCA9685Manager ::setChannelPWM_cmdHandler(FwOpcodeType opCode, U32 cmdSeq, 
     }
     const bool ok = this->writeChannel(channel, pwm);
     if (ok) {
-        // A raw pulse has no meaningful angle/speed, so show 0 (unknown) rather than a wrong number.
-        this->m_values[channel] = 0.0f;
+        // A raw pulse has no direction/magnitude; the pulse itself is still reported
+        this->setState(channel, billeeScm::motorDir::STOPPED, 0, pwm);
     }
     this->respond(opCode, cmdSeq, ok);
 }
 
-void PCA9685Manager ::releaseChannel_cmdHandler(FwOpcodeType opCode, U32 cmdSeq, U8 channel) {
-    if (channel >= NUM_SERVO_CHANNELS) {
+void PCA9685Manager ::releaseChannel_cmdHandler(FwOpcodeType opCode, U32 cmdSeq, billeeScm::ServoId servo) {
+    if (!servo.isValid()) {
         this->cmdResponse_out(opCode, cmdSeq, Fw::CmdResponse::VALIDATION_ERROR);
         return;
     }
@@ -153,16 +143,17 @@ void PCA9685Manager ::releaseChannel_cmdHandler(FwOpcodeType opCode, U32 cmdSeq,
         this->cmdResponse_out(opCode, cmdSeq, Fw::CmdResponse::EXECUTION_ERROR);
         return;
     }
+    const U8 channel = static_cast<U8>(servo.e);
     const bool ok = this->writeChannel(channel, 0);
     if (ok) {
-        this->m_values[channel] = 0.0f;
+        this->setState(channel, billeeScm::motorDir::STOPPED, 0, 0);
     }
     this->respond(opCode, cmdSeq, ok);
 }
 
-void PCA9685Manager ::releaseAll_cmdHandler(FwOpcodeType opCode, U32 cmdSeq) {
+void PCA9685Manager ::hardStop_cmdHandler(FwOpcodeType opCode, U32 cmdSeq) {
     // Deliberately NOT gated on m_initOk: this is the software stop (OE is not wired), so it must always try the bus.
-    // (Only refused if configure() never ran.)
+    // (Only refused if configure() never ran.) One transaction releases every channel at once.
     if (this->m_pca == nullptr) {
         this->cmdResponse_out(opCode, cmdSeq, Fw::CmdResponse::EXECUTION_ERROR);
         return;
@@ -171,7 +162,7 @@ void PCA9685Manager ::releaseAll_cmdHandler(FwOpcodeType opCode, U32 cmdSeq) {
     const bool ok = this->checkI2c(ALL_CHANNELS, true);
     if (ok) {
         for (U8 channel = 0; channel < NUM_SERVO_CHANNELS; channel++) {
-            this->m_values[channel] = 0.0f;
+            this->setState(channel, billeeScm::motorDir::STOPPED, 0, 0);
         }
     }
     this->respond(opCode, cmdSeq, ok);
@@ -190,21 +181,29 @@ void PCA9685Manager ::reinit_cmdHandler(FwOpcodeType opCode, U32 cmdSeq) {
 // Helpers
 // ----------------------------------------------------------------------
 
-U16 PCA9685Manager ::pwmForPosition(U8 channel, F32 position) const {
+U16 PCA9685Manager ::pulseFor(U8 channel, U16 pwm, billeeScm::motorDir direction) const {
     const ServoCal& cal = kServoCal[channel];
-    // Piecewise linear through (-1, min), (0, mid), (+1, max). Each half has its own slope, so a servo whose
-    // center is not exactly halfway between its end points is still centred at 0.
-    const F32 span = (position < 0.0f) ? static_cast<F32>(cal.midPwm - cal.minPwm)
-                                       : static_cast<F32>(cal.maxPwm - cal.midPwm);
-    F32 pwm = static_cast<F32>(cal.midPwm) + position * span + 0.5f;
-    // Defensive clamp: the callers validate position, but a pulse outside [min,max] must be impossible.
-    if (pwm < static_cast<F32>(cal.minPwm)) {
-        pwm = static_cast<F32>(cal.minPwm);
+    if (direction == billeeScm::motorDir::STOPPED || pwm == 0) {
+        return cal.midPwm;
     }
-    if (pwm > static_cast<F32>(cal.maxPwm)) {
-        pwm = static_cast<F32>(cal.maxPwm);
+    const bool forward = (direction == billeeScm::motorDir::FORWARD) != cal.reversed;
+    // Each side of mid has its own span, so a servo whose neutral is not exactly halfway between its end points
+    // still maps 0 to neutral and full scale to each end point. Integer math, rounded to the nearest count.
+    const U32 span = forward ? static_cast<U32>(cal.maxPwm - cal.midPwm) : static_cast<U32>(cal.midPwm - cal.minPwm);
+    const U32 offset = (static_cast<U32>(pwm) * span + PWM_FULL_SCALE / 2) / PWM_FULL_SCALE;
+    U32 pulse = forward ? cal.midPwm + offset : cal.midPwm - offset;
+    // Defensive clamp: the caller validates pwm, but a pulse outside [min,max] must be impossible.
+    if (pulse < cal.minPwm) {
+        pulse = cal.minPwm;
     }
-    return static_cast<U16>(pwm);
+    if (pulse > cal.maxPwm) {
+        pulse = cal.maxPwm;
+    }
+    return static_cast<U16>(pulse);
+}
+
+void PCA9685Manager ::setState(U8 channel, billeeScm::motorDir direction, U16 pwm, U16 pulse) {
+    this->m_states[channel] = billeeScm::ServoState(direction, pwm, pulse);
 }
 
 bool PCA9685Manager ::writeChannel(U8 channel, U16 pwm) {
@@ -243,7 +242,7 @@ bool PCA9685Manager ::initDevice(bool logFaults) {
     ok = this->checkI2c(ALL_CHANNELS, logFaults) && ok;
     if (ok) {
         for (U8 channel = 0; channel < NUM_SERVO_CHANNELS; channel++) {
-            this->m_values[channel] = 0.0f;
+            this->setState(channel, billeeScm::motorDir::STOPPED, 0, 0);
         }
     }
     return ok;

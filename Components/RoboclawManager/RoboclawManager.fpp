@@ -10,16 +10,21 @@ module billeeScm {
         @ Output port to get the value of the limit switch (index 0 = Motor1, index 1 = Motor2)
         output port limitSwGet: [2] Drv.GpioRead
 
-        @ Drive one motor. motor.speed is the Roboclaw's raw duty value, 0-127 (0 = stop, 127 = full speed),
-        @ NOT 0-255 and NOT scaled: 128-255 is rejected with VALIDATION_ERROR and nothing is sent to the
-        @ Roboclaw. motor.motorNum is 1 or 2; motor.motorDir is FORWARD, REVERSE or STOPPED (STOPPED ignores
-        @ speed); motor.motorState is ignored on input.
-        async command motorCmd (
-            motor: billeeScm.yellowJacket
+        @ Drive one motor. pwm is 0-1000 = 0.0-100.0% duty (0 = stop, 1000 = full duty), sent to the Roboclaw as a
+        @ signed 16-bit duty (+/-32767). pwm > 1000 is rejected with VALIDATION_ERROR and nothing is sent.
+        @ direction STOPPED ignores pwm.
+        async command setMotor(
+            motor: billeeScm.motorId      @< MOTOR1 or MOTOR2
+            pwm: U16                      @< PWM magnitude, 0-1000 (0.1% steps)
+            direction: billeeScm.motorDir @< FORWARD, REVERSE or STOPPED
             ) opcode 0x00
 
-        @ Clears a latched communication-fault (checkErr) state, allowing further motorCmds
+        @ Clears a latched communication-fault (checkErr) state, allowing further setMotor commands
         async command clearError() opcode 0x01
+
+        @ Hard stop: immediately sets both motors to duty 0 in one packet, cancelling any setMotor still in flight
+        @ (it is answered EXECUTION_ERROR and never runs). Accepted in every state, including a latched fault.
+        async command hardStop() opcode 0x02
 
         @ Does Motor1 have a limit switch wired for safety-stop? If false, its switch is never read.
         param motor1HasLimitSwitch: bool default true
@@ -33,6 +38,14 @@ module billeeScm {
               severity warning low \
               id 0x00 \
               format "{}" 
+
+        @ A hardStop was executed. ok = false if the Roboclaw did not acknowledge the stop packet.
+        event hardStopEvent(
+            ok: bool @< Roboclaw acknowledged the stop
+            ) \
+              severity warning high \
+              id 0x01 \
+              format "Hard stop sent to both motors, acknowledged: {}"
 
         @ STOPPED/0/OFF (assumed, not read back from the Roboclaw) until the first command.
         telemetry motor1: billeeScm.yellowJacket

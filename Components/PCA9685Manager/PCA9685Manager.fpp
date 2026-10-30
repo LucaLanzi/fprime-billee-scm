@@ -1,48 +1,43 @@
 module billeeScm {
     @ Component to drive a PCA9685 16-channel PWM board over I2C. Controls up to 12 servos.
-    @ Each channel is either POSITIONAL (setServoAngle) or CONTINUOUS (setServoSpeed); which one is a
-    @ compile-time table in PCA9685Manager.cpp (all POSITIONAL by default), together with each channel's
-    @ min/mid/max pulse limits. A command that would send a pulse outside those limits is rejected with
-    @ VALIDATION_ERROR and nothing is sent on the bus.
+    @ Every servo, positional or continuous-rotation, is driven the same way: a PWM magnitude and a direction
+    @ around its calibrated neutral pulse (setServo). Each channel's min/mid/max pulse limits and a `reversed`
+    @ flag are a compile-time table in PCA9685Manager.cpp; no command can send a pulse outside those limits.
     active component PCA9685Manager {
 
         @ Input port for run handler (publishes telemetry)
         async input port run: Svc.Sched
 
-        @ Move one POSITIONAL servo. channel is 0-11; angle is -90..+90 degrees (0 = calibrated center).
-        @ Rejected with VALIDATION_ERROR if the channel is CONTINUOUS.
-        async command setServoAngle(
-            channel: U8 @< Servo channel, 0-11
-            angle: F32  @< Angle in degrees, -90.0..+90.0
+        @ Drive one servo. pwm is 0-1000 = 0.0-100.0% of the servo's calibrated travel (positional) or speed
+        @ (continuous) in the given direction, measured from its neutral pulse. STOPPED, or pwm 0, holds the neutral
+        @ pulse (continuous servo stops, positional servo centres). pwm > 1000 is rejected with VALIDATION_ERROR.
+        async command setServo(
+            servo: billeeScm.ServoId      @< Servo to drive
+            pwm: U16                      @< PWM magnitude, 0-1000 (0.1% steps)
+            direction: billeeScm.motorDir @< FORWARD, REVERSE or STOPPED
         ) opcode 0x00
-
-        @ Drive one CONTINUOUS-rotation servo. channel is 0-11; speed is -1.0..+1.0 (0 = stop).
-        @ Rejected with VALIDATION_ERROR if the channel is POSITIONAL.
-        async command setServoSpeed(
-            channel: U8 @< Servo channel, 0-11
-            speed: F32  @< Speed, -1.0..+1.0
-        ) opcode 0x01
 
         @ Raw PWM for bring-up and calibration. pwm 0 releases the channel; any other value must lie inside
         @ that channel's calibrated [min,max] pulse limits, otherwise VALIDATION_ERROR (4096 "full on" is never allowed).
         async command setChannelPWM(
-            channel: U8 @< Channel, 0-11
-            pwm: U16    @< 0 = release, else PWM counts (0-4095 scale, 50 Hz)
-        ) opcode 0x02
+            servo: billeeScm.ServoId @< Servo to drive
+            pwm: U16                 @< 0 = release, else PWM counts (0-4095 scale, 50 Hz)
+        ) opcode 0x01
 
         @ Stop pulsing one channel (the servo goes limp)
         async command releaseChannel(
-            channel: U8 @< Channel, 0-11
-        ) opcode 0x03
+            servo: billeeScm.ServoId @< Servo to release
+        ) opcode 0x02
 
-        @ Stop pulsing every channel. This is the software stop: the PCA9685's OE pin is not wired.
-        async command releaseAll() opcode 0x04
+        @ Hard stop: stop pulsing every channel at once (all servos go limp). This is the software stop: the
+        @ PCA9685's OE pin is not wired. Always tries the bus, even if init failed.
+        async command hardStop() opcode 0x03
 
         @ Re-run PCA9685 initialisation and release all channels. Use after powering the board on after the Teensy.
-        async command reinit() opcode 0x05
+        async command reinit() opcode 0x04
 
-        @ Last commanded value per channel: degrees for POSITIONAL, speed for CONTINUOUS, 0 if released
-        telemetry servoAngles: billeeScm.ServoAngles
+        @ Last commanded state per channel (direction, PWM magnitude, pulse sent), indexed by ServoId
+        telemetry servoStates: billeeScm.ServoStates
 
         @ Number of I2C transactions that reported an error since boot
         telemetry i2cErrorCount: U32

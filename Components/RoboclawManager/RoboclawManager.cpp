@@ -61,9 +61,13 @@ void RoboclawManager ::run_handler(FwIndexType portNum, U32 context) {
 // Handler implementations for commands
 // ----------------------------------------------------------------------
 
-void RoboclawManager ::motorCmd_cmdHandler(FwOpcodeType opCode, U32 cmdSeq, billeeScm::yellowJacket motor) {
-    // Out-of-range speed never reaches the serial line
-    if (motor.get_speed() > MAX_MOTOR_SPEED) {
+void RoboclawManager ::setMotor_cmdHandler(FwOpcodeType opCode,
+                                            U32 cmdSeq,
+                                            billeeScm::motorId motor,
+                                            U16 pwm,
+                                            billeeScm::motorDir direction) {
+    // Out-of-range magnitude or invalid enum never reaches the serial line
+    if (!motor.isValid() || !direction.isValid() || pwm > PWM_FULL_SCALE) {
         this->cmdResponse_out(opCode, cmdSeq, Fw::CmdResponse::VALIDATION_ERROR);
         return;
     }
@@ -81,12 +85,34 @@ void RoboclawManager ::motorCmd_cmdHandler(FwOpcodeType opCode, U32 cmdSeq, bill
     this->m_pendingOpCode = opCode;
     this->m_pendingCmdSeq = cmdSeq;
     this->m_cmdPending = true;
-    this->motorControlSM_sendSignal_cmdRecv(motor);
+    this->motorControlSM_sendSignal_cmdRecv(billeeScm::yellowJacket(motor, direction, pwm, Fw::On::OFF));
 }
 
 void RoboclawManager ::clearError_cmdHandler(FwOpcodeType opCode, U32 cmdSeq) {
     this->motorControlSM_sendSignal_errClr();
     this->cmdResponse_out(opCode, cmdSeq, Fw::CmdResponse::OK);
+}
+
+void RoboclawManager ::hardStop_cmdHandler(FwOpcodeType opCode, U32 cmdSeq) {
+    // Runs here, not through the state machine, so it is never blocked by checkErr or a command in flight.
+    // Same thread as the state machine actions (active component), so there is no race with them.
+    // One packet stops both motors at once.
+    const bool ok = (this->m_roboclaw != nullptr) && this->m_roboclaw->DutyM1M2(this->m_address, 0, 0);
+    // A setMotor whose cmdRecv is still queued would otherwise restart its motor right after this stop
+    if (this->m_cmdPending) {
+        this->completePendingCmd(Fw::CmdResponse::EXECUTION_ERROR);
+        this->m_cancelledCmds++;
+    }
+    if (ok) {
+        // One hardStopEvent instead of two motorEvents: eventLogger's queue is shallow and a sequence may
+        // hard-stop both Roboclaws back to back.
+        this->reportMotorState(
+            billeeScm::yellowJacket(billeeScm::motorId::MOTOR1, billeeScm::motorDir::STOPPED, 0, Fw::On::OFF), false);
+        this->reportMotorState(
+            billeeScm::yellowJacket(billeeScm::motorId::MOTOR2, billeeScm::motorDir::STOPPED, 0, Fw::On::OFF), false);
+    }
+    this->log_WARNING_HI_hardStopEvent(ok);
+    this->cmdResponse_out(opCode, cmdSeq, ok ? Fw::CmdResponse::OK : Fw::CmdResponse::EXECUTION_ERROR);
 }
 
 // ----------------------------------------------------------------------
@@ -97,12 +123,9 @@ void RoboclawManager ::billeeScm_MotorControlStateMachine_action_motorFwd(
     SmId smId,
     billeeScm_MotorControlStateMachine::Signal signal,
     const billeeScm::yellowJacket& value) {
-    bool ok = (this->m_roboclaw != nullptr) &&
-              ((value.get_motorNum() == billeeScm::motorId::MOTOR1)
-                   ? this->m_roboclaw->ForwardM1(this->m_address, value.get_speed())
-                   : this->m_roboclaw->ForwardM2(this->m_address, value.get_speed()));
+    const bool ok = this->sendDuty(value.get_motorNum(), toDuty(value.get_pwm()));
     this->reportMotorState(billeeScm::yellowJacket(value.get_motorNum(), billeeScm::motorDir::FORWARD,
-                                                     value.get_speed(),
+                                                     value.get_pwm(),
                                                      ok ? Fw::On::ON : Fw::On::OFF));
     this->completePendingCmd(ok ? Fw::CmdResponse::OK : Fw::CmdResponse::EXECUTION_ERROR);
     ok ? this->motorControlSM_sendSignal_success() : this->motorControlSM_sendSignal_fail();
@@ -112,12 +135,9 @@ void RoboclawManager ::billeeScm_MotorControlStateMachine_action_motorRev(
     SmId smId,
     billeeScm_MotorControlStateMachine::Signal signal,
     const billeeScm::yellowJacket& value) {
-    bool ok = (this->m_roboclaw != nullptr) &&
-              ((value.get_motorNum() == billeeScm::motorId::MOTOR1)
-                   ? this->m_roboclaw->BackwardM1(this->m_address, value.get_speed())
-                   : this->m_roboclaw->BackwardM2(this->m_address, value.get_speed()));
+    const bool ok = this->sendDuty(value.get_motorNum(), static_cast<I16>(-toDuty(value.get_pwm())));
     this->reportMotorState(billeeScm::yellowJacket(value.get_motorNum(), billeeScm::motorDir::REVERSE,
-                                                     value.get_speed(),
+                                                     value.get_pwm(),
                                                      ok ? Fw::On::ON : Fw::On::OFF));
     this->completePendingCmd(ok ? Fw::CmdResponse::OK : Fw::CmdResponse::EXECUTION_ERROR);
     ok ? this->motorControlSM_sendSignal_success() : this->motorControlSM_sendSignal_fail();
@@ -127,10 +147,7 @@ void RoboclawManager ::billeeScm_MotorControlStateMachine_action_motorStop(
     SmId smId,
     billeeScm_MotorControlStateMachine::Signal signal,
     const billeeScm::yellowJacket& value) {
-    bool ok = (this->m_roboclaw != nullptr) &&
-              ((value.get_motorNum() == billeeScm::motorId::MOTOR1)
-                   ? this->m_roboclaw->ForwardM1(this->m_address, 0)
-                   : this->m_roboclaw->ForwardM2(this->m_address, 0));
+    const bool ok = this->sendDuty(value.get_motorNum(), 0);
     this->reportMotorState(
         billeeScm::yellowJacket(value.get_motorNum(), billeeScm::motorDir::STOPPED, 0, Fw::On::OFF));
     this->completePendingCmd(ok ? Fw::CmdResponse::OK : Fw::CmdResponse::EXECUTION_ERROR);
@@ -141,8 +158,21 @@ void RoboclawManager ::billeeScm_MotorControlStateMachine_action_rejectCmd(
     SmId smId,
     billeeScm_MotorControlStateMachine::Signal signal,
     const billeeScm::yellowJacket& value) {
-    // Reached only when a command was accepted by the handler but the fault latched before it ran
+    // Reached only when a command was accepted by the handler but the fault latched before it ran. If a hardStop
+    // cancelled it meanwhile, it was already answered: just consume the cancellation.
+    if (this->m_cancelledCmds > 0) {
+        this->m_cancelledCmds--;
+        return;
+    }
     this->completePendingCmd(Fw::CmdResponse::EXECUTION_ERROR);
+}
+
+void RoboclawManager ::billeeScm_MotorControlStateMachine_action_dropCmd(
+    SmId smId,
+    billeeScm_MotorControlStateMachine::Signal signal,
+    const billeeScm::yellowJacket& value) {
+    // hardStop already answered this command (EXECUTION_ERROR); nothing is sent to the Roboclaw
+    this->m_cancelledCmds--;
 }
 
 // ----------------------------------------------------------------------
@@ -170,6 +200,13 @@ bool RoboclawManager ::billeeScm_MotorControlStateMachine_guard_isStopCmd(
     return value.get_motorDir() == billeeScm::motorDir::STOPPED;
 }
 
+bool RoboclawManager ::billeeScm_MotorControlStateMachine_guard_isCancelled(
+    SmId smId,
+    billeeScm_MotorControlStateMachine::Signal signal,
+    const billeeScm::yellowJacket& value) const {
+    return this->m_cancelledCmds > 0;
+}
+
 bool RoboclawManager ::billeeScm_MotorControlStateMachine_guard_isLimitSwTripped(
     SmId smId,
     billeeScm_MotorControlStateMachine::Signal signal,
@@ -193,7 +230,7 @@ void RoboclawManager ::completePendingCmd(Fw::CmdResponse response) {
     }
 }
 
-void RoboclawManager ::reportMotorState(const billeeScm::yellowJacket& motor) {
+void RoboclawManager ::reportMotorState(const billeeScm::yellowJacket& motor, bool logEvent) {
     // Cache the state so run_handler keeps republishing it; also write now so a command's result is
     // visible immediately rather than on the next cycle.
     if (motor.get_motorNum() == billeeScm::motorId::MOTOR1) {
@@ -203,7 +240,23 @@ void RoboclawManager ::reportMotorState(const billeeScm::yellowJacket& motor) {
         this->m_motor2State = motor;
         this->tlmWrite_motor2(motor);
     }
-    this->log_WARNING_LO_motorEvent(motor);
+    if (logEvent) {
+        this->log_WARNING_LO_motorEvent(motor);
+    }
+}
+
+bool RoboclawManager ::sendDuty(billeeScm::motorId motor, I16 duty) {
+    if (this->m_roboclaw == nullptr) {
+        return false;
+    }
+    // The library takes the signed duty as its raw 16-bit word, so a negative duty is passed two's-complement
+    const uint16_t word = static_cast<uint16_t>(duty);
+    return (motor == billeeScm::motorId::MOTOR1) ? this->m_roboclaw->DutyM1(this->m_address, word)
+                                                 : this->m_roboclaw->DutyM2(this->m_address, word);
+}
+
+I16 RoboclawManager ::toDuty(U16 pwm) {
+    return static_cast<I16>((static_cast<U32>(pwm) * MAX_DUTY + PWM_FULL_SCALE / 2) / PWM_FULL_SCALE);
 }
 
 }  // namespace billeeScm
