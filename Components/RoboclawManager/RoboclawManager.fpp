@@ -7,7 +7,8 @@ module billeeScm {
         @ Input port for run handler
         async input port run: Svc.Sched 
 
-        @ Output port to get the value of the limit switch (index 0 = Motor1, index 1 = Motor2)
+        @ Output port to get the value of the limit switch (index 0 = Motor1, index 1 = Motor2). Leave a port
+        @ unconnected for a motor with no switch: it is then never read.
         output port limitSwGet: [2] Drv.GpioRead
 
         @ Drive one motor. pwm is 0-1000 = 0.0-100.0% duty (0 = stop, 1000 = full duty), sent to the Roboclaw as a

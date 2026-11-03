@@ -31,7 +31,9 @@ void RoboclawManager ::configure(HardwareSerial* serial, U8 address, uint32_t ba
 void RoboclawManager ::run_handler(FwIndexType portNum, U32 context) {
     Fw::ParamValid valid;
 
-    if (this->paramGet_motor1HasLimitSwitch(valid)) {
+    // A motor with no switch wired in the topology (limitSwGet port left unconnected) is treated the same as
+    // motorNHasLimitSwitch = false: invoking an unconnected output port is an FW_ASSERT.
+    if (this->isConnected_limitSwGet_OutputPort(0) && this->paramGet_motor1HasLimitSwitch(valid)) {
         Fw::Logic state;
         Drv::GpioStatus status = this->limitSwGet_out(0, state);
         this->m_motor1SwitchTripped = (status == Drv::GpioStatus::OP_OK) && (state == Fw::Logic::LOW);
@@ -39,7 +41,7 @@ void RoboclawManager ::run_handler(FwIndexType portNum, U32 context) {
         this->m_motor1SwitchTripped = false;
     }
 
-    if (this->paramGet_motor2HasLimitSwitch(valid)) {
+    if (this->isConnected_limitSwGet_OutputPort(1) && this->paramGet_motor2HasLimitSwitch(valid)) {
         Fw::Logic state;
         Drv::GpioStatus status = this->limitSwGet_out(1, state);
         this->m_motor2SwitchTripped = (status == Drv::GpioStatus::OP_OK) && (state == Fw::Logic::LOW);
