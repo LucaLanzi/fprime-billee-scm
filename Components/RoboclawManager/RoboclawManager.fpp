@@ -1,67 +1,118 @@
 module billeeScm {
-    @ Component capable of driving two seperate motors over Serial.
+    @ Drives every Roboclaw motor on the Science Control Module: three Roboclaw 2x7A boards in packet-serial mode
+    @ (RoboclawId) and the five motors they drive (RoboclawMotor). Each motor has an optional lower and upper limit
+    @ switch; FORWARD always moves toward the upper one, REVERSE toward the lower one (a motor wired the other way is
+    @ fixed with configureMotor(..., invert)). A motor moving toward a tripped switch is stopped on the next tick,
+    @ whatever command started it.
+    @
+    @ Commands that wait on the hardware (RUN_FOR, TO_LIMIT) are answered only when the motion ends, so in a sequence
+    @ the next command starts after the motion.
     active component RoboclawManager {
 
-        state machine instance motorControlSM: MotorControlStateMachine
+        @ Rate group tick (50 Hz): checks limit switches and timers, polls one Roboclaw telemetry item, publishes
+        @ telemetry every 5th tick. Drops the tick if the queue is full.
+        async input port run: Svc.Sched drop
 
-        @ Input port for run handler
-        async input port run: Svc.Sched 
+        @ Limit switch reads, index = 2 * RoboclawMotor + 0 (lower) / 1 (upper). A switch is tripped when it reads LOW
+        @ (closes to GND). Leave a port unconnected where a motor has no switch.
+        output port limitSwGet: [ROBOCLAW_LIMIT_PORTS] Drv.GpioRead
 
-        @ Output port to get the value of the limit switch (index 0 = Motor1, index 1 = Motor2). Leave a port
-        @ unconnected for a motor with no switch: it is then never read.
-        output port limitSwGet: [2] Drv.GpioRead
+        @ Run a motor until STOP, its limit switch in that direction, or another command on it. Answered once the
+        @ Roboclaw acknowledges. direction STOPPED stops the motor. Refused (EXECUTION_ERROR, LimitBlocked) if the
+        @ switch in that direction is already tripped.
+        async command MOVE(
+            motor: billeeScm.RoboclawMotor @< Motor
+            direction: billeeScm.MotorDir  @< FORWARD (toward upper switch), REVERSE (toward lower) or STOPPED
+            speed: U8                      @< 0-100 % duty
+        ) opcode 0x00
 
-        @ Drive one motor. pwm is 0-1000 = 0.0-100.0% duty (0 = stop, 1000 = full duty), sent to the Roboclaw as a
-        @ signed 16-bit duty (+/-32767). pwm > 1000 is rejected with VALIDATION_ERROR and nothing is sent.
-        @ direction STOPPED ignores pwm.
-        async command setMotor(
-            motor: billeeScm.motorId      @< MOTOR1 or MOTOR2
-            pwm: U16                      @< PWM magnitude, 0-1000 (0.1% steps)
-            direction: billeeScm.motorDir @< FORWARD, REVERSE or STOPPED
-            ) opcode 0x00
+        @ Run a motor for durationMs, then stop it. Answered OK when the time is up; EXECUTION_ERROR if a limit
+        @ switch stops it first, the command is superseded, or the board does not answer. 1-300000 ms.
+        async command RUN_FOR(
+            motor: billeeScm.RoboclawMotor @< Motor
+            direction: billeeScm.MotorDir  @< FORWARD or REVERSE
+            speed: U8                      @< 0-100 % duty
+            durationMs: U32                @< Run time in milliseconds
+        ) opcode 0x01
 
-        @ Clears a latched communication-fault (checkErr) state, allowing further setMotor commands
-        async command clearError() opcode 0x01
+        @ Run a motor until the limit switch in its direction trips (answered OK), or timeoutMs passes (stopped,
+        @ EXECUTION_ERROR). Answered OK at once if that switch is already tripped. VALIDATION_ERROR if the motor has
+        @ no switch in that direction. 1-300000 ms.
+        async command TO_LIMIT(
+            motor: billeeScm.RoboclawMotor @< Motor
+            direction: billeeScm.MotorDir  @< FORWARD (to upper switch) or REVERSE (to lower switch)
+            speed: U8                      @< 0-100 % duty
+            timeoutMs: U32                 @< Give up and stop after this many milliseconds
+        ) opcode 0x02
 
-        @ Hard stop: immediately sets both motors to duty 0 in one packet, cancelling any setMotor still in flight
-        @ (it is answered EXECUTION_ERROR and never runs). Accepted in every state, including a latched fault.
-        async command hardStop() opcode 0x02
+        @ Stop one motor. A RUN_FOR / TO_LIMIT running on it is answered EXECUTION_ERROR.
+        async command STOP(
+            motor: billeeScm.RoboclawMotor @< Motor
+        ) opcode 0x03
 
-        @ Does Motor1 have a limit switch wired for safety-stop? If false, its switch is never read.
-        param motor1HasLimitSwitch: bool default true
+        @ Stop every motor on every board (one packet per board). Every running RUN_FOR / TO_LIMIT is answered
+        @ EXECUTION_ERROR. Fails only if a board that may have a motor running does not acknowledge.
+        async command STOP_ALL() opcode 0x04
 
-        @ Does Motor2 have a limit switch wired for safety-stop? If false, its switch is never read.
-        param motor2HasLimitSwitch: bool default true
+        @ Zero both encoder counts of one board
+        async command RESET_ENCODERS(
+            roboclaw: billeeScm.RoboclawId @< Board
+        ) opcode 0x05
 
-        event motorEvent(
-            motor: yellowJacket
-            ) \
-              severity warning low \
-              id 0x00 \
-              format "{}" 
+        @ A motor started
+        event MotorStarted(
+            motor: billeeScm.RoboclawMotor @< Motor
+            mode: billeeScm.MotorMode      @< MOVE, RUN_FOR or TO_LIMIT
+            direction: billeeScm.MotorDir  @< Direction
+            speed: U8                      @< % duty
+        ) \
+          severity activity high \
+          id 0x00 \
+          format "{} started: {} {} at {}%"
 
-        @ A hardStop was executed. ok = false if the Roboclaw did not acknowledge the stop packet.
-        event hardStopEvent(
-            ok: bool @< Roboclaw acknowledged the stop
-            ) \
-              severity warning high \
-              id 0x01 \
-              format "Hard stop sent to both motors, acknowledged: {}"
+        @ A motor stopped
+        event MotorStopped(
+            motor: billeeScm.RoboclawMotor @< Motor
+            reason: billeeScm.StopReason   @< Why
+        ) \
+          severity activity high \
+          id 0x01 \
+          format "{} stopped: {}"
 
-        @ STOPPED/0/OFF (assumed, not read back from the Roboclaw) until the first command.
-        telemetry motor1: billeeScm.yellowJacket
+        @ A command was refused because the limit switch in its direction is already tripped
+        event LimitBlocked(
+            motor: billeeScm.RoboclawMotor @< Motor
+            direction: billeeScm.MotorDir  @< Refused direction
+        ) \
+          severity warning low \
+          id 0x02 \
+          format "{} {} refused: limit switch in that direction is tripped"
 
-        @ STOPPED/0/OFF (assumed, not read back from the Roboclaw) until the first command.
-        telemetry motor2: billeeScm.yellowJacket
+        @ A board answered after being offline (or for the first time)
+        event BoardOnline(
+            roboclaw: billeeScm.RoboclawId @< Board
+        ) \
+          severity activity high \
+          id 0x03 \
+          format "Roboclaw {} online"
 
-        @ Motor1 limit switch: true = tripped. False if the switch is not wired (param disabled) or the GPIO read failed.
-        telemetry motor1LimitSwitch: bool
+        @ A board stopped answering. It is probed every 2 s until it answers again.
+        event BoardOffline(
+            roboclaw: billeeScm.RoboclawId @< Board
+        ) \
+          severity warning high \
+          id 0x04 \
+          format "Roboclaw {} not answering"
 
-        @ Motor2 limit switch: true = tripped. False if the switch is not wired (param disabled) or the GPIO read failed.
-        telemetry motor2LimitSwitch: bool
+        @ State of every motor (mode, command, limit switches, encoder, current)
+        telemetry motorStates: billeeScm.RoboclawMotorStates
 
-        ################################################
+        @ State of every board (online, battery voltage, error bits)
+        telemetry boardStates: billeeScm.RoboclawBoardStates
 
+        ###############################################################################
+        # Standard AC Ports: Required for Channels, Events, Commands, and Parameters  #
+        ###############################################################################
         @ Port for requesting the current time
         time get port timeCaller
 
@@ -73,12 +124,5 @@ module billeeScm {
 
         @ Enables telemetry channels handling
         import Fw.Channel
-
-        @ Port to return the value of a parameter
-        param get port prmGetOut
-
-        @Port to set the value of a parameter
-        param set port prmSetOut
-
     }
 }

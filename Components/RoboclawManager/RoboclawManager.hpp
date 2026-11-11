@@ -1,237 +1,135 @@
 // ======================================================================
 // \title  RoboclawManager.hpp
 // \author luca_lanzi
-// \brief  hpp file for RoboclawManager component implementation class
+// \brief  All Roboclaw boards and motors of the Science Control Module, with limit switches
 // ======================================================================
-
 #ifndef billeeScm_RoboclawManager_HPP
 #define billeeScm_RoboclawManager_HPP
 
 #include "Components/RoboclawManager/RoboclawManagerComponentAc.hpp"
 #include <RoboClaw.h>
-// RoboClaw.h pulls in Arduino's HardwareSerial.h, which #defines HIGH/LOW as plain macros that
-// would otherwise clobber Fw::Logic::HIGH/LOW below. FprimeArduino.hpp captures them as
-// Arduino::DEF_HIGH/DEF_LOW and #undefs the raw macros -- same fix GpioDriver.cpp uses.
+// RoboClaw.h pulls in Arduino's HardwareSerial.h, which #defines HIGH/LOW as plain macros that would clobber
+// Fw::Logic::HIGH/LOW. FprimeArduino.hpp captures them as Arduino::DEF_HIGH/DEF_LOW and #undefs the raw macros.
 #include <Arduino/config/FprimeArduino.hpp>
-#include <new>  // for placement new, see m_roboclawStorage below
+#include <new>  // placement new, see Board::storage
 
 namespace billeeScm {
 
 class RoboclawManager final : public RoboclawManagerComponentBase {
   public:
-    // ----------------------------------------------------------------------
-    // Component construction and destruction
-    // ----------------------------------------------------------------------
+    static constexpr FwIndexType NUM_BOARDS = billeeScm::RoboclawBoardStates::SIZE;
+    static constexpr FwIndexType NUM_MOTORS = billeeScm::RoboclawMotorStates::SIZE;
+    static constexpr U8 SPEED_FULL_SCALE = 100;   //!< Speed is 0-100 % duty
+    static constexpr I32 MAX_DUTY = 32767;        //!< Full duty of the Roboclaw's signed duty commands
+    static constexpr U32 MAX_MOTION_MS = 300000;  //!< Longest RUN_FOR / TO_LIMIT (under cmdSeq's 600 s timeout)
+    static constexpr U32 PROBE_PERIOD_TICKS = 100;  //!< Offline boards are probed every 2 s at 50 Hz
+    static constexpr U32 TLM_PERIOD_TICKS = 5;      //!< Telemetry published at 10 Hz from the 50 Hz tick
 
-    //! Construct RoboclawManager object
-    RoboclawManager(const char* const compName  //!< The component name
-    );
-
-    //! Destroy RoboclawManager object
+    RoboclawManager(const char* const compName);
     ~RoboclawManager();
 
-    //! Bind this instance to its physical Roboclaw board. Call once during topology init,
-    //! before the rate group starts ticking this component.
-    void configure(HardwareSerial* serial, U8 address, uint32_t baud = 38400);
+    //! Bind a board to its serial port and packet-serial address. Call once per board during topology setup.
+    void configureBoard(billeeScm::RoboclawId board, HardwareSerial* serial, U8 address, uint32_t baud = 38400);
+
+    //! invert = true when the motor's positive duty moves it toward its LOWER switch, so that FORWARD always moves
+    //! toward the upper one. Also negates its encoder count. Default false.
+    void configureMotor(billeeScm::RoboclawMotor motor, bool invert);
 
   private:
-    // ----------------------------------------------------------------------
-    // Handler implementations for typed input ports
-    // ----------------------------------------------------------------------
+    void run_handler(FwIndexType portNum, U32 context) override;
+    void MOVE_cmdHandler(FwOpcodeType opCode,
+                         U32 cmdSeq,
+                         billeeScm::RoboclawMotor motor,
+                         billeeScm::MotorDir direction,
+                         U8 speed) override;
+    void RUN_FOR_cmdHandler(FwOpcodeType opCode,
+                            U32 cmdSeq,
+                            billeeScm::RoboclawMotor motor,
+                            billeeScm::MotorDir direction,
+                            U8 speed,
+                            U32 durationMs) override;
+    void TO_LIMIT_cmdHandler(FwOpcodeType opCode,
+                             U32 cmdSeq,
+                             billeeScm::RoboclawMotor motor,
+                             billeeScm::MotorDir direction,
+                             U8 speed,
+                             U32 timeoutMs) override;
+    void STOP_cmdHandler(FwOpcodeType opCode, U32 cmdSeq, billeeScm::RoboclawMotor motor) override;
+    void STOP_ALL_cmdHandler(FwOpcodeType opCode, U32 cmdSeq) override;
+    void RESET_ENCODERS_cmdHandler(FwOpcodeType opCode, U32 cmdSeq, billeeScm::RoboclawId roboclaw) override;
 
-    //! Handler implementation for run
-    //!
-    //! Input port for run handler
-    void run_handler(FwIndexType portNum,  //!< The port number
-                     U32 context           //!< The call order
-                     ) override;
+    struct Board {
+        alignas(RoboClaw) uint8_t storage[sizeof(RoboClaw)];  //!< RoboClaw driver, placement-new'd in configureBoard
+        RoboClaw* rc = nullptr;
+        U8 address = 0;
+        bool online = false;
+        U32 nextProbeTick = 0;
+        U16 batteryDv = 0;
+        U32 errorBits = 0;
+    };
 
-  private:
-    // ----------------------------------------------------------------------
-    // Handler implementations for commands
-    // ----------------------------------------------------------------------
+    struct Motor {
+        U8 board = 0;    //!< RoboclawId of its board
+        U8 channel = 1;  //!< 1 = M1, 2 = M2 on that board
+        bool invert = false;
+        billeeScm::MotorMode::T mode = billeeScm::MotorMode::IDLE;
+        billeeScm::MotorDir::T direction = billeeScm::MotorDir::STOPPED;
+        U8 speed = 0;
+        bool lowerLimit = false;
+        bool upperLimit = false;
+        I32 encoder = 0;
+        I32 currentMa = 0;
+        // Command waiting for the motion to end (RUN_FOR / TO_LIMIT)
+        bool pending = false;
+        FwOpcodeType opCode = 0;
+        U32 cmdSeq = 0;
+        Fw::Time start;
+        U32 limitMs = 0;
+    };
 
-    //! Handler implementation for command setMotor
-    void setMotor_cmdHandler(FwOpcodeType opCode,          //!< The opcode
-                             U32 cmdSeq,                   //!< The command sequence number
-                             billeeScm::motorId motor,     //!< MOTOR1 or MOTOR2
-                             U16 pwm,                      //!< PWM magnitude, 0-1000
-                             billeeScm::motorDir direction //!< FORWARD, REVERSE or STOPPED
-                             ) override;
+    //! Validate and start a motion. Answers the command itself (now for MOVE, at the end for RUN_FOR / TO_LIMIT).
+    void startMotion(FwOpcodeType opCode,
+                     U32 cmdSeq,
+                     FwIndexType m,
+                     billeeScm::MotorMode::T mode,
+                     billeeScm::MotorDir::T direction,
+                     U8 speed,
+                     U32 limitMs);
 
-    //! Handler implementation for command clearError
-    void clearError_cmdHandler(FwOpcodeType opCode,  //!< The opcode
-                                U32 cmdSeq            //!< The command sequence number
-                                ) override;
+    //! Send duty 0 to a motor, set it IDLE, emit MotorStopped and answer its pending command (if any) with
+    //! `response`. Returns false if the stop was not acknowledged by a board that may have the motor running.
+    bool stopMotor(FwIndexType m, billeeScm::StopReason reason, Fw::CmdResponse response);
 
-    //! Handler implementation for command hardStop
-    void hardStop_cmdHandler(FwOpcodeType opCode,  //!< The opcode
-                             U32 cmdSeq            //!< The command sequence number
-                             ) override;
+    //! Answer and forget a motor's pending command (no-op if none)
+    void finishPending(FwIndexType m, Fw::CmdResponse response);
 
-  private:
-    // ----------------------------------------------------------------------
-    // Implementations for internal state machine actions
-    // ----------------------------------------------------------------------
+    //! Read every connected limit switch into the motor table
+    void readLimitSwitches();
 
-    //! Implementation for action motorFwd of state machine billeeScm_MotorControlStateMachine
-    //!
-    //! forward the motor
-    void billeeScm_MotorControlStateMachine_action_motorFwd(
-        SmId smId,                                          //!< The state machine id
-        billeeScm_MotorControlStateMachine::Signal signal,  //!< The signal
-        const billeeScm::yellowJacket& value                //!< The value
-        ) override;
+    //! True if the switch in `direction` is tripped
+    bool limitTripped(FwIndexType m, billeeScm::MotorDir::T direction) const;
 
-    //! Implementation for action motorRev of state machine billeeScm_MotorControlStateMachine
-    //!
-    //! reverse the motor
-    void billeeScm_MotorControlStateMachine_action_motorRev(
-        SmId smId,                                          //!< The state machine id
-        billeeScm_MotorControlStateMachine::Signal signal,  //!< The signal
-        const billeeScm::yellowJacket& value                //!< The value
-        ) override;
+    //! True if a limit switch is wired in `direction`
+    bool hasLimit(FwIndexType m, billeeScm::MotorDir::T direction);
 
-    //! Implementation for action motorStop of state machine billeeScm_MotorControlStateMachine
-    //!
-    //! stop the motor
-    void billeeScm_MotorControlStateMachine_action_motorStop(
-        SmId smId,                                          //!< The state machine id
-        billeeScm_MotorControlStateMachine::Signal signal,  //!< The signal
-        const billeeScm::yellowJacket& value                //!< The value
-        ) override;
+    //! Send a signed duty to one motor. Updates the board's online state. Returns true if acknowledged.
+    bool sendDuty(FwIndexType m, I32 duty);
 
-    //! Implementation for action rejectCmd of state machine billeeScm_MotorControlStateMachine
-    //!
-    //! answer a command that arrived while a communication fault is latched
-    void billeeScm_MotorControlStateMachine_action_rejectCmd(
-        SmId smId,                                          //!< The state machine id
-        billeeScm_MotorControlStateMachine::Signal signal,  //!< The signal
-        const billeeScm::yellowJacket& value                //!< The value
-        ) override;
+    //! One telemetry transaction (or offline probe) per tick
+    void pollTelemetry();
 
-    //! Implementation for action dropCmd of state machine billeeScm_MotorControlStateMachine
-    //!
-    //! discard a command a hardStop cancelled (hardStop already answered it)
-    void billeeScm_MotorControlStateMachine_action_dropCmd(
-        SmId smId,                                          //!< The state machine id
-        billeeScm_MotorControlStateMachine::Signal signal,  //!< The signal
-        const billeeScm::yellowJacket& value                //!< The value
-        ) override;
+    void markOnline(FwIndexType b);
+    void markOffline(FwIndexType b);
 
-  private:
-    // ----------------------------------------------------------------------
-    // Implementations for internal state machine guards
-    // ----------------------------------------------------------------------
+    //! Index of the motor on board b, channel c (1/2), or -1 if that channel drives nothing
+    FwIndexType motorAt(FwIndexType b, U8 channel) const;
 
-    //! Implementation for guard isFwdCmd of state machine billeeScm_MotorControlStateMachine
-    //!
-    //! true if the command requests FORWARD
-    bool billeeScm_MotorControlStateMachine_guard_isFwdCmd(
-        SmId smId,                                          //!< The state machine id
-        billeeScm_MotorControlStateMachine::Signal signal,  //!< The signal
-        const billeeScm::yellowJacket& value                //!< The value
-    ) const override;
+    void publishTelemetry();
 
-    //! Implementation for guard isRevCmd of state machine billeeScm_MotorControlStateMachine
-    //!
-    //! true if the command requests REVERSE
-    bool billeeScm_MotorControlStateMachine_guard_isRevCmd(
-        SmId smId,                                          //!< The state machine id
-        billeeScm_MotorControlStateMachine::Signal signal,  //!< The signal
-        const billeeScm::yellowJacket& value                //!< The value
-    ) const override;
-
-    //! Implementation for guard isStopCmd of state machine billeeScm_MotorControlStateMachine
-    //!
-    //! true if the command requests STOPPED
-    bool billeeScm_MotorControlStateMachine_guard_isStopCmd(
-        SmId smId,                                          //!< The state machine id
-        billeeScm_MotorControlStateMachine::Signal signal,  //!< The signal
-        const billeeScm::yellowJacket& value                //!< The value
-    ) const override;
-
-    //! Implementation for guard isLimitSwTripped of state machine billeeScm_MotorControlStateMachine
-    //!
-    //! true if this motor's limit switch is tripped and the commanded direction should be blocked
-    bool billeeScm_MotorControlStateMachine_guard_isLimitSwTripped(
-        SmId smId,                                          //!< The state machine id
-        billeeScm_MotorControlStateMachine::Signal signal,  //!< The signal
-        const billeeScm::yellowJacket& value                //!< The value
-    ) const override;
-
-    //! Implementation for guard isCancelled of state machine billeeScm_MotorControlStateMachine
-    //!
-    //! true if a hardStop cancelled this command after it was queued
-    bool billeeScm_MotorControlStateMachine_guard_isCancelled(
-        SmId smId,                                          //!< The state machine id
-        billeeScm_MotorControlStateMachine::Signal signal,  //!< The signal
-        const billeeScm::yellowJacket& value                //!< The value
-    ) const override;
-
-    // ----------------------------------------------------------------------
-    // Helpers
-    // ----------------------------------------------------------------------
-
-    //! Update telemetry (+ motorEvent if logEvent) for a motor's actual resulting state (called from each action)
-    void reportMotorState(const billeeScm::yellowJacket& motor, bool logEvent = true);
-
-    //! Drive one motor at a signed duty (-32767..+32767; 0 = stop). Selects M1/M2 from motorNum.
-    //! @return true if the Roboclaw acknowledged the packet
-    bool sendDuty(billeeScm::motorId motor, I16 duty);
-
-    //! Map a validated PWM magnitude (0-PWM_FULL_SCALE) to the Roboclaw's duty magnitude (0-MAX_DUTY), rounded
-    static I16 toDuty(U16 pwm);
-
-    //! Send the response for the command currently in flight (no-op if none). Called from the state
-    //! machine actions: signals are queued on the component, so the Roboclaw call has not happened yet
-    //! when setMotor_cmdHandler returns and the real result is only known inside the action.
-    void completePendingCmd(Fw::CmdResponse response);
-
-    //! Full-scale PWM magnitude of setMotor (0-1000 = 0.0-100.0% duty); anything larger is rejected before any
-    //! serial traffic. Same scale as PCA9685Manager::PWM_FULL_SCALE.
-    static constexpr U16 PWM_FULL_SCALE = 1000;
-
-    //! Full duty of the Roboclaw's signed duty commands (DutyM1/DutyM2/DutyM1M2)
-    static constexpr I16 MAX_DUTY = 32767;
-
-    // Packet-serial driver instance, constructed in configure() via placement new into this
-    // static storage. NOT heap-allocated (no plain `new RoboClaw(...)`): this deployment never
-    // calls Os::Baremetal::OverrideNewDelete::registerMemAllocator(), so the global `operator
-    // new` override's FW_ASSERT(pAllocator != nullptr) would fire on the very first heap
-    // allocation anywhere in the firmware and halt the board before it ever produces output --
-    // confirmed on real hardware: build succeeds, board boots, zero bytes ever appear on
-    // serial. Placement new below constructs into pre-reserved memory without going through
-    // the overridden global operator new at all, sidestepping the issue entirely.
-    alignas(RoboClaw) uint8_t m_roboclawStorage[sizeof(RoboClaw)];
-    RoboClaw* m_roboclaw = nullptr;  //!< Points into m_roboclawStorage once configure() runs
-    U8 m_address = 0;                //!< This instance's Roboclaw device address, set in configure()
-
-    // The one setMotor currently in flight (accepted by setMotor_cmdHandler, answered by a state
-    // machine action). A second setMotor while this is set is rejected as busy.
-    bool m_cmdPending = false;
-    FwOpcodeType m_pendingOpCode = 0;
-    U32 m_pendingCmdSeq = 0;
-
-    // Commands cancelled by hardStop whose cmdRecv signal is still queued. hardStop answers the command and
-    // clears m_cmdPending at once, but the signal still reaches the state machine later; each one consumes a
-    // count (dropCmd, or rejectCmd in checkErr) instead of running. A counter, not a flag: a second hardStop can
-    // cancel a newer command before the first cancelled signal has been dispatched. Signals are FIFO, so the
-    // cancelled ones are always the oldest queued.
-    U8 m_cancelledCmds = 0;
-
-    // Last reported state of each motor, republished as telemetry every run_handler cycle so the
-    // channels exist from the first tick and stay visible to a GDS that connects later (TlmChan
-    // only re-sends a channel when it is written). STOPPED/0/OFF until the first command is an
-    // assumption: nothing is read back from, or sent to, the Roboclaw at boot.
-    billeeScm::yellowJacket m_motor1State{billeeScm::motorId::MOTOR1, billeeScm::motorDir::STOPPED, 0, Fw::On::OFF};
-    billeeScm::yellowJacket m_motor2State{billeeScm::motorId::MOTOR2, billeeScm::motorDir::STOPPED, 0, Fw::On::OFF};
-
-    // Limit-switch state, refreshed once per tick in run_handler: guard implementations are
-    // const, but the generated limitSwGet_out port-invoke helper is not, so the switches are
-    // polled here and the guard just reads the cached result.
-    bool m_motor1SwitchTripped = false;
-    bool m_motor2SwitchTripped = false;
+    Board m_boards[NUM_BOARDS];
+    Motor m_motors[NUM_MOTORS];
+    U32 m_tick = 0;
+    U32 m_pollSlot = 0;  //!< Round-robin position over (board, telemetry item)
 };
 
 }  // namespace billeeScm

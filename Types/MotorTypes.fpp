@@ -8,11 +8,4 @@ module billeeScm {
         FORWARD = 1 @< Forward (Roboclaw: toward the UPPER limit switch)
         REVERSE = 2 @< Reverse (Roboclaw: toward the LOWER limit switch)
     }
-
-    @ Legacy direction type used by the pre-consolidation RoboclawManager; removed with it (stage 3).
-    enum motorDir {
-        STOPPED = 1 @< Stopped / neutral (PWM magnitude ignored)
-        FORWARD = 2 @< Drive forward
-        REVERSE = 3 @< Drive in reverse
-    }
 }
