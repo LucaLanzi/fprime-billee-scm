@@ -1,138 +1,73 @@
 // ======================================================================
 // \title  PCA9685Manager.hpp
 // \author luca_lanzi
-// \brief  hpp file for PCA9685Manager component implementation class
+// \brief  PCA9685 16-channel servo board over I2C
 // ======================================================================
-
 #ifndef billeeScm_PCA9685Manager_HPP
 #define billeeScm_PCA9685Manager_HPP
 
 #include "Components/PCA9685Manager/PCA9685ManagerComponentAc.hpp"
 #include <PCA9685.h>
-// PCA9685.h pulls in Arduino.h, which #defines HIGH/LOW as plain macros that would otherwise clobber
-// Fw::Logic::HIGH/LOW in any later include. FprimeArduino.hpp captures them as Arduino::DEF_HIGH/DEF_LOW
-// and #undefs the raw macros -- same fix RoboclawManager.hpp uses.
+// PCA9685.h pulls in Arduino's headers, which #define HIGH/LOW as plain macros that would clobber Fw::Logic::HIGH/LOW.
+// FprimeArduino.hpp captures them as Arduino::DEF_HIGH/DEF_LOW and #undefs the raw macros.
 #include <Arduino/config/FprimeArduino.hpp>
-#include <new>  // for placement new, see m_pcaStorage below
+#include <new>  // placement new, see m_pcaStorage
 
 namespace billeeScm {
 
 class PCA9685Manager final : public PCA9685ManagerComponentBase {
   public:
-    //! Servo channels exposed (the chip has 16). Must equal billeeScm::ServoStates::SIZE (Types/PCA9685Types.fpp).
-    static constexpr U8 NUM_SERVO_CHANNELS = 12;
+    //! Number of servo channels (SERVO_COUNT in Types/PCA9685Types.fpp)
+    static constexpr U8 NUM_SERVOS = billeeScm::ServoStates::SIZE;
 
-    //! Full-scale PWM magnitude of setServo: 0-1000 = 0.0-100.0% of a servo's calibrated span in one direction
-    static constexpr U16 PWM_FULL_SCALE = 1000;
+    //! Full-scale speed of SERVO_SET, in percent
+    static constexpr U8 SPEED_FULL_SCALE = 100;
 
-    // ----------------------------------------------------------------------
-    // Component construction and destruction
-    // ----------------------------------------------------------------------
-
-    //! Construct PCA9685Manager object
-    PCA9685Manager(const char* const compName  //!< The component name
-    );
-
-    //! Destroy PCA9685Manager object
+    PCA9685Manager(const char* const compName);
     ~PCA9685Manager();
 
-    //! Bind this instance to its I2C bus and initialise the PCA9685 (50 Hz servo frame, all channels released).
-    //! Call once during topology init, before the rate group starts ticking this component. Calls
-    //! wire->begin() itself. a5a0 is the value of the board's A5..A0 address pins (0-61), NOT the 7-bit I2C
-    //! address: the library adds the 0x40 base itself, so a default board is 0 (-> 0x40).
+    //! Bind to the PCA9685 on `wire` (address pins A5..A0 = a5a0) and initialize it. Call once during topology
+    //! setup, before the rate group starts ticking this component.
     void configure(TwoWire* wire, U8 a5a0, uint32_t i2cSpeed = 100000);
 
   private:
-    // ----------------------------------------------------------------------
-    // Handler implementations for typed input ports
-    // ----------------------------------------------------------------------
+    void run_handler(FwIndexType portNum, U32 context) override;
+    void SERVO_SET_cmdHandler(FwOpcodeType opCode,
+                              U32 cmdSeq,
+                              billeeScm::ServoId servo,
+                              billeeScm::MotorDir direction,
+                              U8 speed) override;
+    void SERVO_OFF_cmdHandler(FwOpcodeType opCode, U32 cmdSeq, billeeScm::ServoId servo) override;
+    void SERVO_PULSE_cmdHandler(FwOpcodeType opCode, U32 cmdSeq, billeeScm::ServoId servo, U16 counts) override;
+    void STOP_ALL_cmdHandler(FwOpcodeType opCode, U32 cmdSeq) override;
+    void REINIT_cmdHandler(FwOpcodeType opCode, U32 cmdSeq) override;
 
-    //! Handler implementation for run
-    //!
-    //! Input port for run handler
-    void run_handler(FwIndexType portNum,  //!< The port number
-                     U32 context           //!< The call order
-                     ) override;
+    //! Pulse (counts) for a direction/speed on a channel, clamped to the channel's calibrated limits
+    U16 pulseFor(U8 channel, billeeScm::MotorDir direction, U8 speed) const;
 
-  private:
-    // ----------------------------------------------------------------------
-    // Handler implementations for commands
-    // ----------------------------------------------------------------------
+    //! Record a channel's commanded state (republished every tick)
+    void setState(U8 channel, billeeScm::MotorDir direction, U8 speed, U16 pulse);
 
-    //! Handler implementation for command setServo
-    void setServo_cmdHandler(FwOpcodeType opCode,          //!< The opcode
-                             U32 cmdSeq,                   //!< The command sequence number
-                             billeeScm::ServoId servo,     //!< Servo to drive
-                             U16 pwm,                      //!< PWM magnitude, 0-1000
-                             billeeScm::motorDir direction //!< FORWARD, REVERSE or STOPPED
-                             ) override;
+    //! Write one channel (0 = release) and check the bus. Returns true on success.
+    bool writeChannel(U8 channel, U16 counts);
 
-    //! Handler implementation for command setChannelPWM
-    void setChannelPWM_cmdHandler(FwOpcodeType opCode,       //!< The opcode
-                                  U32 cmdSeq,                //!< The command sequence number
-                                  billeeScm::ServoId servo,  //!< Servo to drive
-                                  U16 pwm                    //!< 0 = release, else PWM counts within the channel's limits
-                                  ) override;
+    //! Read the library's last I2C error; count it and log I2cFault when the code changes. Returns true if no error.
+    bool checkI2c(U8 channel);
 
-    //! Handler implementation for command releaseChannel
-    void releaseChannel_cmdHandler(FwOpcodeType opCode,      //!< The opcode
-                                   U32 cmdSeq,               //!< The command sequence number
-                                   billeeScm::ServoId servo  //!< Servo to release
-                                   ) override;
+    //! Initialize the PCA9685 (50 Hz) and release every channel. Returns true if every transaction succeeded.
+    bool initDevice();
 
-    //! Handler implementation for command hardStop
-    void hardStop_cmdHandler(FwOpcodeType opCode,  //!< The opcode
-                             U32 cmdSeq            //!< The command sequence number
-                             ) override;
-
-    //! Handler implementation for command reinit
-    void reinit_cmdHandler(FwOpcodeType opCode,  //!< The opcode
-                           U32 cmdSeq            //!< The command sequence number
-                           ) override;
-
-  private:
-    // ----------------------------------------------------------------------
-    // Helpers
-    // ----------------------------------------------------------------------
-
-    //! Pulse for a PWM magnitude (0-PWM_FULL_SCALE) and direction, using the channel's calibrated min/mid/max:
-    //! STOPPED or 0 -> mid, FORWARD full scale -> max, REVERSE full scale -> min (swapped if the channel is
-    //! `reversed`). Linear on each side of mid. Never returns a value outside [min,max].
-    //! Deliberately NOT PCA9685_ServoEval: see the comment on m_pcaStorage.
-    U16 pulseFor(U8 channel, U16 pwm, billeeScm::motorDir direction) const;
-
-    //! Record a channel's commanded state (republished as servoStates every run tick)
-    void setState(U8 channel, billeeScm::motorDir direction, U16 pwm, U16 pulse);
-
-    //! Send one PWM value (0 = release) to one channel, then check the transaction result.
-    //! @return true if the I2C transaction succeeded
-    bool writeChannel(U8 channel, U16 pwm);
-
-    //! Read the library's last I2C result, update the error counters/telemetry state, and (if logFault) emit
-    //! I2cFault once per new fault, not once per repeated failure, to avoid flooding eventLogger's shallow queue.
-    //! @return true if the last transaction succeeded
-    bool checkI2c(U8 channel, bool logFault);
-
-    //! init() + 50 Hz servo frame + release all channels.
-    //! @return true if every step's I2C transaction succeeded
-    bool initDevice(bool logFaults);
-
-    //! Send the command response: OK if ok, else EXECUTION_ERROR.
     void respond(FwOpcodeType opCode, U32 cmdSeq, bool ok);
 
-    // PCA9685 driver instance, constructed in configure() via placement new into this static storage.
-    // NOT heap-allocated, and PCA9685_ServoEval is NOT used, because this deployment never calls
-    // Os::Baremetal::OverrideNewDelete::registerMemAllocator(): the global operator new/new[] override's
-    // FW_ASSERT(pAllocator != nullptr) fires on the very first heap allocation and halts the board (see the
-    // matching comment in RoboclawManager.hpp). PCA9685_ServoEval's constructors all do `new float[]`, so using
-    // them would assert at boot; the PCA9685 class itself never allocates.
+    // PCA9685 driver, constructed in configure() with placement new into this storage rather than on the heap, so
+    // its lifetime and memory are fixed at build time.
     alignas(PCA9685) uint8_t m_pcaStorage[sizeof(PCA9685)];
-    PCA9685* m_pca = nullptr;  //!< Points into m_pcaStorage once configure() runs
+    PCA9685* m_pca = nullptr;
 
-    bool m_initOk = false;               //!< True once initDevice() has fully succeeded
-    billeeScm::ServoStates m_states;     //!< Last commanded state per channel (default: STOPPED, 0, released)
-    U32 m_i2cErrorCount = 0;             //!< Failed I2C transactions since boot
-    U8 m_lastI2cError = 0;               //!< Wire code of the most recent transaction (0 = ok)
+    bool m_initOk = false;            //!< True once initDevice() has fully succeeded
+    billeeScm::ServoStates m_states;  //!< Last commanded state per servo
+    U32 m_i2cErrorCount = 0;          //!< Failed I2C transactions since boot
+    U8 m_lastI2cError = 0;            //!< Wire code of the most recent transaction (0 = ok)
 };
 
 }  // namespace billeeScm
